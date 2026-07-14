@@ -1,5 +1,7 @@
 # vpn-guard · VPN 出口一致性 / 防泄露工具箱
 
+![vpn-guard — VPN 出口一致性 / 防泄露工具箱](assets/social-preview.png)
+
 > Windows + Clash 用户在使用 VPN 访问**受地区限制的平台**时，用来自查真实身份是否泄露、
 > 并让浏览器指纹（时区 / 语言）与出口 IP 所在国**保持一致**的一组 PowerShell 脚本。
 >
