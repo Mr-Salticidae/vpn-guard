@@ -1,0 +1,6 @@
+# 独立 Chrome 会话配置（含浏览数据/cookie，绝不入库）
+chrome-*-profile/
+
+# 临时/日志
+*.log
+*.tmp
