@@ -38,6 +38,51 @@ head_ " VPN 出口一致性 / 泄露自查 "
 echo " 时间: $(date '+%Y-%m-%d %H:%M:%S %z')"
 dline
 
+# ---------- 0. 代理客户端与流量接管方式 ----------
+head_ "0) 代理客户端与流量接管方式"
+known='clash|mihomo|verge|v2ray|xray|sing-box|singbox|ss-local|sslocal|shadowsocks|hysteria|tuic|trojan|naive|juicity|wireguard|openvpn'
+procs=$(ps -Ao comm= 2>/dev/null | sed 's|.*/||' | grep -Ei "$known" | sort -u | tr '\n' ' ')
+if [ -n "$procs" ]; then
+    info "客户端进程 : $procs"
+else
+    info "未识别出已知代理客户端进程（Clash/V2Ray/Xray/sing-box/SS/WireGuard/OpenVPN……不影响后续检查）"
+fi
+
+# 对外路由走哪块网卡（用真实公网地址查路由，能识别 0/1 分裂路由和策略路由）
+route_if=""
+case "$(uname)" in
+    Darwin) route_if=$(route -n get 1.1.1.1 2>/dev/null | awk '/interface:/{print $2}') ;;
+    Linux)  route_if=$(ip route get 1.1.1.1 2>/dev/null | grep -o 'dev [^ ]*' | head -1 | awk '{print $2}') ;;
+esac
+# 系统代理是否开启
+sysproxy=""
+case "$(uname)" in
+    Darwin)
+        if scutil --proxy 2>/dev/null | grep -qE '(HTTPEnable|HTTPSEnable|SOCKSEnable) : 1'; then sysproxy=1; fi ;;
+    Linux)
+        if [ -n "${http_proxy:-}${https_proxy:-}${all_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}" ]; then
+            sysproxy=1
+        elif command -v gsettings >/dev/null 2>&1 && [ "$(gsettings get org.gnome.system.proxy mode 2>/dev/null)" = "'manual'" ]; then
+            sysproxy=1
+        fi ;;
+esac
+
+TAKEOVER="none"
+case "$route_if" in
+    utun*|tun*|tap*|wg*|Meta*|meta*|mihomo*|sing*)
+        TAKEOVER="tun"
+        ok "TUN 模式（对外路由走 $route_if）—— 全局流量（含 UDP/WebRTC）均被接管" ;;
+    *)
+        if [ -n "$sysproxy" ]; then
+            TAKEOVER="sysproxy"
+            warn "系统代理模式 —— 浏览器流量走代理；不支持代理的应用与 UDP/WebRTC 可能绕行直连"
+            info "建议：开启客户端的 TUN/增强模式（Clash Verge: TUN 模式；v2rayN: 启用 Tun；sing-box: tun 入站）"
+        else
+            warn "未检测到 TUN 路由或系统代理 —— 若你在用浏览器插件级代理或仅本地端口，只有明确配置了代理的应用被接管"
+        fi ;;
+esac
+line
+
 # ---------- 1. 公网 IPv4 + 地理位置 + 代理标记 ----------
 head_ "1) 公网出口 IP 与地理位置"
 # ip-api 的 line 格式按 fields 顺序逐行返回，无需 JSON 解析器
@@ -131,7 +176,7 @@ else
         [ -z "$s" ] && continue
         case "$s" in
             198.18.*|198.19.*)
-                ok "DNS: $s  (Clash fake-ip 隧道解析)" ;;
+                ok "DNS: $s  (fake-ip 隧道解析 — Clash/Mihomo/sing-box/Xray fakedns 特征)" ;;
             10.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*|127.*)
                 info "DNS: $s  (内网/本地)" ;;
             *)
@@ -140,6 +185,9 @@ else
     done <<EOF
 $dns_servers
 EOF
+fi
+if [ "$TAKEOVER" = "sysproxy" ]; then
+    info "当前为系统代理模式：浏览器把域名交给代理远端解析，本地 DNS 主要影响直连/不走代理的应用。"
 fi
 info "提示：确认 Chrome 已关闭“安全 DNS(DoH)”，否则浏览器会绕过 VPN 自行解析。"
 dline

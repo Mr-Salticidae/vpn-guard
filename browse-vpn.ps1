@@ -8,10 +8,13 @@
     powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1            # 自动识别当前出口
     powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -DryRun    # 只预览会怎么设置，不切时区/不开浏览器
     powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Country US # 强制按某国预设（不依赖探测）
+    powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Proxy socks5://127.0.0.1:10808
+        # 客户端只开了本地端口（如 v2rayN 默认 10808）而没开系统代理/TUN 时，让 Chrome 直接走该端口
 #>
 
 param(
     [string]$Country = "",   # 留空=自动探测；或 JP/US/SG/HK/TW/KR/GB/DE/FR/NL/CA/AU
+    [string]$Proxy   = "",   # 传给 Chrome --proxy-server，如 socks5://127.0.0.1:10808
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -65,8 +68,26 @@ $ianaToWin = @{
 }
 
 function Get-Exit {
-    try { return Invoke-RestMethod -Uri "http://ip-api.com/json/?fields=status,country,countryCode,city,timezone,offset,isp,query,proxy,hosting" -TimeoutSec 15 }
+    $u = "http://ip-api.com/json/?fields=status,country,countryCode,city,timezone,offset,isp,query,proxy,hosting"
+    try {
+        # -Proxy 为 http(s) 代理时，探测也走它，保证拿到的是真实出口；PS5.1 不支持 SOCKS 探测
+        if ($Proxy -match '^https?://') { return Invoke-RestMethod -Uri $u -Proxy $Proxy -TimeoutSec 15 }
+        return Invoke-RestMethod -Uri $u -TimeoutSec 15
+    }
     catch { return $null }
+}
+
+# ---- 0) 接管方式安全检查：都没有时 Chrome 会直连暴露真实 IP ----
+if (-not $Proxy) {
+    $tunPat = 'tun|tap|wintun|wireguard|meta|mihomo|sing-?box'
+    $tunUp = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and ($_.Name -match $tunPat -or $_.InterfaceDescription -match $tunPat) }
+    $inet = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+    if (-not $tunUp -and $inet.ProxyEnable -ne 1 -and -not $inet.AutoConfigURL) {
+        Write-Host "⚠ 未检测到 TUN 网卡或系统代理 —— Chrome 将直连（暴露真实 IP）！" -ForegroundColor Red
+        Write-Host "  若客户端只开了本地端口，请加 -Proxy socks5://127.0.0.1:<端口>（v2rayN 默认 SOCKS 10808 / HTTP 10809）。" -ForegroundColor Yellow
+    }
+} elseif ($Proxy -match '^socks') {
+    Write-Host "提示：PS5.1 的出口探测不支持 SOCKS 代理，探测结果可能是直连出口；建议用 http:// 端口（v2rayN 默认 10809）或加 -Country 指定。" -ForegroundColor Yellow
 }
 
 # ---- 1) 探测出口 ----
@@ -136,6 +157,7 @@ try {
     Write-Host ("已临时切换到: {0}（会话期间系统钟随出口国走，属正常）" -f $winTz) -ForegroundColor Yellow
     Write-Host "正在启动一致性 Chrome 会话……关闭该 Chrome 窗口后时区会自动还原。" -ForegroundColor Cyan
     $args = @("--user-data-dir=$profileDir", "--lang=$($lang.Split(',')[0])", "--accept-lang=$lang", "--no-first-run", "--no-default-browser-check")
+    if ($Proxy) { $args += "--proxy-server=$Proxy" }
     Start-Process -FilePath $Chrome -ArgumentList $args -Wait
 }
 finally {

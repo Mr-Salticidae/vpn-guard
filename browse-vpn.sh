@@ -11,6 +11,9 @@
 #     ./browse-vpn.sh --dry-run    # 只预览会怎么设置，不开浏览器
 #     ./browse-vpn.sh US           # 强制按某国预设（不依赖探测）
 #     ./browse-vpn.sh JP --dry-run # 可组合
+#     ./browse-vpn.sh --proxy=socks5://127.0.0.1:10808
+#         # 客户端只开了本地端口（如 v2rayN/Xray 的 SOCKS 端口）而没开系统代理/TUN 时，
+#         # 让出口探测和 Chrome 都直接走该端口
 #
 #   依赖：bash 3.2+、curl、Google Chrome（或 Chromium）。
 #   Windows 用户请使用同目录下的 browse-vpn.ps1。
@@ -18,13 +21,14 @@
 set -u
 
 # ---- 参数 ----
-COUNTRY=""; DRYRUN=0
+COUNTRY=""; DRYRUN=0; PROXY=""
 for a in "$@"; do
     case "$a" in
         --dry-run|-DryRun) DRYRUN=1 ;;
         --country=*)       COUNTRY=${a#*=} ;;
+        --proxy=*)         PROXY=${a#*=} ;;
         [A-Za-z][A-Za-z])  COUNTRY=$a ;;
-        *) echo "未知参数: $a   用法: ./browse-vpn.sh [国家码] [--dry-run]" >&2; exit 1 ;;
+        *) echo "未知参数: $a   用法: ./browse-vpn.sh [国家码] [--dry-run] [--proxy=socks5://127.0.0.1:端口]" >&2; exit 1 ;;
     esac
 done
 COUNTRY=$(echo "$COUNTRY" | tr '[:lower:]' '[:upper:]')
@@ -78,9 +82,30 @@ preset() {
     esac
 }
 
-# ---- 1) 探测出口 ----
+# ---- 0) 接管方式安全检查：都没有时 Chrome 会直连暴露真实 IP ----
+if [ -z "$PROXY" ]; then
+    route_if=""; sysproxy=""
+    case "$(uname)" in
+        Darwin)
+            route_if=$(route -n get 1.1.1.1 2>/dev/null | awk '/interface:/{print $2}')
+            scutil --proxy 2>/dev/null | grep -qE '(HTTPEnable|HTTPSEnable|SOCKSEnable) : 1' && sysproxy=1 ;;
+        Linux)
+            route_if=$(ip route get 1.1.1.1 2>/dev/null | grep -o 'dev [^ ]*' | head -1 | awk '{print $2}')
+            [ -n "${http_proxy:-}${https_proxy:-}${all_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}" ] && sysproxy=1 ;;
+    esac
+    case "$route_if" in
+        utun*|tun*|tap*|wg*|Meta*|meta*|mihomo*|sing*) : ;;  # TUN 接管，安全
+        *)
+            if [ -z "$sysproxy" ]; then
+                echo "${C_RED}⚠ 未检测到 TUN 路由或系统代理 —— Chrome 将直连（暴露真实 IP）！${C_RESET}"
+                echo "${C_YELLOW}  若客户端只开了本地端口，请加 --proxy=socks5://127.0.0.1:<端口>（v2rayN/Xray 常用 10808/1080）。${C_RESET}"
+            fi ;;
+    esac
+fi
+
+# ---- 1) 探测出口（指定了 --proxy 时探测也走它，保证拿到真实出口）----
 echo "${C_CYAN}探测当前 VPN 出口……${C_RESET}"
-resp=$(curl -fsS --max-time 15 \
+resp=$(curl -fsS --max-time 15 ${PROXY:+-x "$PROXY"} \
   "http://ip-api.com/line/?fields=status,country,countryCode,city,timezone,offset,isp,query,proxy,hosting" 2>/dev/null)
 ip_status=""; ip_country=""; ip_cc=""; ip_city=""; ip_tz=""; ip_offset=""; ip_isp=""; ip_query=""; ip_proxy=""; ip_hosting=""
 if [ -n "$resp" ]; then
@@ -164,6 +189,7 @@ TZ=$tz "$CHROME" \
     --lang="${lang%%,*}" \
     --accept-lang="$lang" \
     --no-first-run \
-    --no-default-browser-check >/dev/null 2>&1
+    --no-default-browser-check \
+    ${PROXY:+--proxy-server="$PROXY"} >/dev/null 2>&1
 echo "${C_GREEN}会话结束。系统时区从未被改动。${C_RESET}"
 echo "${C_GRAY}建议关闭前在目标平台点一次登出，避免会话 cookie 跨时区复用。${C_RESET}"

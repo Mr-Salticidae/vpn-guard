@@ -18,6 +18,38 @@ Write-Host " VPN 出口一致性 / 泄露自查 " -ForegroundColor Cyan
 Write-Host (" 时间: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))
 Line '='
 
+# ---------- 0. 代理客户端与流量接管方式 ----------
+Write-Host "0) 代理客户端与流量接管方式" -ForegroundColor Cyan
+$knownPat = 'clash|mihomo|verge|v2ray|xray|sing-?box|ss-local|sslocal|shadowsocks|hysteria|tuic|trojan|naive|juicity|wireguard|openvpn'
+$procs = Get-Process | Where-Object { $_.ProcessName -match $knownPat } | Select-Object -ExpandProperty ProcessName -Unique
+if ($procs) { Info ("客户端进程 : {0}" -f ($procs -join ', ')) }
+else { Info "未识别出已知代理客户端进程（Clash/V2Ray/Xray/sing-box/SS/WireGuard/OpenVPN……不影响后续检查）" }
+
+$tunPat = 'tun|tap|wintun|wireguard|meta|mihomo|sing-?box'
+$upAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
+$tunAdapters = @($upAdapters | Where-Object { $_.Name -match $tunPat -or $_.InterfaceDescription -match $tunPat })
+$routeIf = $null
+try { $routeIf = (Find-NetRoute -RemoteIPAddress 1.1.1.1 -ErrorAction Stop).InterfaceAlias | Select-Object -First 1 } catch {}
+$reg = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+$TakeoverMode = 'none'
+if ($tunAdapters.Count -gt 0 -and $routeIf -and ($tunAdapters.Name -contains $routeIf)) {
+    $TakeoverMode = 'tun'
+    Ok ("TUN 模式（{0}）—— 全局流量（含 UDP/WebRTC）均被接管" -f $routeIf)
+} elseif ($tunAdapters.Count -gt 0) {
+    $TakeoverMode = 'tun'
+    Warn ("检测到 TUN 网卡（{0}），但对外路由走 {1} —— TUN 可能未完全接管，请在客户端确认" -f $tunAdapters[0].Name, $routeIf)
+} elseif ($reg.ProxyEnable -eq 1) {
+    $TakeoverMode = 'sysproxy'
+    Warn ("系统代理模式（{0}）—— 浏览器流量走代理；不支持代理的应用与 UDP/WebRTC 可能绕行直连" -f $reg.ProxyServer)
+    Info "建议：开启客户端的 TUN/虚拟网卡模式（Clash Verge: TUN 模式；v2rayN: 启用 Tun；sing-box: tun 入站）"
+} elseif ($reg.AutoConfigURL) {
+    $TakeoverMode = 'sysproxy'
+    Warn ("PAC 代理模式（{0}）—— 命中规则的浏览器流量走代理；其余应用与 UDP/WebRTC 直连" -f $reg.AutoConfigURL)
+} else {
+    Warn "未检测到 TUN 网卡或系统代理 —— 若你在用浏览器插件级代理（如 SwitchyOmega）或仅本地端口，只有明确配置了代理的应用被接管"
+}
+Line
+
 # ---------- 1. 公网 IPv4 + 地理位置 + 代理标记 ----------
 Write-Host "1) 公网出口 IP 与地理位置" -ForegroundColor Cyan
 $ipapi = $null
@@ -85,12 +117,15 @@ $dns = Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.Server
 foreach ($d in $dns) {
     $servers = $d.ServerAddresses -join ', '
     if ($servers -match '^198\.18\.' -or $servers -match '^198\.19\.') {
-        Ok ("{0}: {1}  (Clash fake-ip 隧道解析)" -f $d.InterfaceAlias, $servers)
+        Ok ("{0}: {1}  (fake-ip 隧道解析 — Clash/Mihomo/sing-box/Xray fakedns 特征)" -f $d.InterfaceAlias, $servers)
     } elseif ($servers -match '^(10\.|172\.|192\.168\.|127\.)') {
         Info ("{0}: {1}  (内网/本地)" -f $d.InterfaceAlias, $servers)
     } else {
         Warn ("{0}: {1}  (公网解析器——若目标域名走 DIRECT 规则，DNS 查询会暴露给此解析器)" -f $d.InterfaceAlias, $servers)
     }
+}
+if ($TakeoverMode -eq 'sysproxy') {
+    Info "当前为系统代理模式：浏览器把域名交给代理远端解析，本地 DNS 主要影响直连/不走代理的应用。"
 }
 Info "提示：确认 Chrome 已关闭“安全 DNS(DoH)”，否则浏览器会绕过 VPN 自行解析。"
 Line '='
