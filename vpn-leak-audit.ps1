@@ -121,11 +121,20 @@ Line
 Write-Host "2) IPv6 泄露面" -ForegroundColor Cyan
 $v6 = $null
 try { $v6 = Invoke-RestMethod -Uri "https://api64.ipify.org?format=json" -TimeoutSec 8 } catch {}
-$hasPubV6 = $false
-if ($v6 -and $v6.ip -match ':') { $hasPubV6 = $true }
-if ($hasPubV6) {
-    Warn ("存在公网 IPv6 出口: {0} —— 若 VPN 只隧道 IPv4，IPv6 会绕过 VPN 暴露真实位置" -f $v6.ip)
-    Info "建议：关闭以太网适配器的 IPv6，或确认 VPN 已接管 IPv6。"
+if ($v6 -and $v6.ip -match ':') {
+    # 关键：有公网 IPv6 不等于泄露。归属与出口一致 = IPv6 也走隧道（出口的 v6）；
+    # 只有归属你的真实 ISP（与出口国不一致）才是绕过 VPN 的真泄露。
+    $v6info = try { Invoke-RestMethod -Uri ("http://ip-api.com/json/{0}?fields=status,countryCode,country,as" -f $v6.ip) -TimeoutSec 8 } catch { $null }
+    $exitCc = if ($ipapi -and $ipapi.status -eq 'success') { $ipapi.countryCode } else { "" }
+    if ($v6info -and $v6info.status -eq 'success' -and $exitCc -and $v6info.countryCode -eq $exitCc) {
+        Ok ("公网 IPv6: {0}（{1} / {2}）—— 与出口国一致，IPv6 也走隧道，未泄露" -f $v6.ip, $v6info.country, $v6info.as)
+    } elseif ($v6info -and $v6info.status -eq 'success' -and $exitCc) {
+        Bad ("公网 IPv6: {0} 归属 {1}（{2}），与出口国 {3} 不一致 —— IPv6 绕过 VPN 暴露真实位置！" -f $v6.ip, $v6info.country, $v6info.as, $ipapi.country)
+        Info "修复：关闭物理网卡的 IPv6，或让 VPN(TUN) 接管 IPv6 隧道。"
+    } else {
+        Warn ("存在公网 IPv6: {0}，但无法查询其归属以判定是否泄露" -f $v6.ip)
+        Info "若该 IPv6 不属于你的 VPN 出口，请关闭网卡 IPv6 或让 VPN 接管 IPv6。"
+    }
 } else {
     Ok "无公网 IPv6 出口（泄露面已收窄）"
 }

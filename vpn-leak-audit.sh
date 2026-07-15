@@ -181,8 +181,23 @@ line
 head_ "2) IPv6 泄露面"
 v6=$(curl -fsS --max-time 8 "https://api64.ipify.org" 2>/dev/null)
 if [ -n "$v6" ] && [[ "$v6" == *:* ]]; then
-    warn "存在公网 IPv6 出口: $v6 —— 若 VPN 只隧道 IPv4，IPv6 会绕过 VPN 暴露真实位置"
-    info "建议：关闭网络接口的 IPv6，或确认 VPN 已接管 IPv6。"
+    # 关键：有公网 IPv6 不等于泄露。若它归属与出口一致，说明 IPv6 也走了隧道（是出口的 v6）；
+    # 只有当它归属你的真实 ISP（与出口国不一致）时，才是绕过 VPN 的真泄露。
+    v6json=$(curl -fsS --max-time 8 "http://ip-api.com/json/$v6?fields=status,countryCode,country,as" 2>/dev/null)
+    v6cc=$(printf '%s' "$v6json" | grep -o '"countryCode":"[^"]*"' | sed 's/.*"countryCode":"//;s/"//')
+    v6country=$(printf '%s' "$v6json" | grep -o '"country":"[^"]*"' | sed 's/.*"country":"//;s/"//')
+    v6as=$(printf '%s' "$v6json" | grep -o '"as":"[^"]*"' | sed 's/.*"as":"//;s/"//')
+    up_v6cc=$(printf '%s' "$v6cc" | tr '[:lower:]' '[:upper:]')
+    up_exit=$(printf '%s' "$ip_cc" | tr '[:lower:]' '[:upper:]')
+    if [ -n "$up_exit" ] && [ -n "$up_v6cc" ] && [ "$up_v6cc" = "$up_exit" ]; then
+        ok "公网 IPv6: $v6（$v6country / $v6as）—— 与出口国一致，IPv6 也走隧道，未泄露"
+    elif [ -n "$up_v6cc" ]; then
+        bad "公网 IPv6: $v6 归属 $v6country（$v6as），与出口国 $ip_country 不一致 —— IPv6 绕过 VPN 暴露真实位置！"
+        info "修复：关闭物理网卡的 IPv6，或让 VPN(TUN) 接管 IPv6 隧道。"
+    else
+        warn "存在公网 IPv6: $v6，但无法查询其归属以判定是否泄露"
+        info "若该 IPv6 不属于你的 VPN 出口，请关闭网卡 IPv6 或让 VPN 接管 IPv6。"
+    fi
 else
     ok "无公网 IPv6 出口（泄露面已收窄）"
 fi

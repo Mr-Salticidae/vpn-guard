@@ -96,7 +96,7 @@ locale consistency, DNS resolution path (static config + **active DNS-leak test*
   Location  : <City> / <Country> (XX)
   [ OK ] not flagged as proxy
   [ OK ] not flagged as hosting/datacenter IP
-2) IPv6 leak surface   [ OK ] no public IPv6 egress
+2) IPv6 leak surface   [ OK ] public IPv6 belongs to exit country (tunneled, no leak)
 3) Timezone check      [FAIL] system UTC+8 vs exit UTC+9, off by +1h  ← #1 giveaway
 4) Language / locale   [WARN] browser default language doesn't match exit country
 5) DNS resolution path [ OK ] fake-ip tunnel resolution (static config)
@@ -192,7 +192,8 @@ in `browse-vpn.sh`.
 | Language | Chrome `--lang` / `--accept-lang` + `intl.selected_languages` in the isolated profile; system locale untouched | same |
 | DNS (static) | "Secure DNS (DoH)" disabled in the isolated Chrome profile, forcing system DNS (TUN mode = fake-ip tunnel; in system-proxy mode hostnames are resolved remotely by the proxy), so the browser can't leak its own lookups | same |
 | DNS (active test) | Triggers real connections to random subdomains to force recursive resolution, then uses bash.ws to look up which resolvers actually answered (country/ASN) and compares to the exit country | same (curl-triggered, identical logic) |
-| IP | Taken over by TUN / system proxy / `--proxy`; the toolkit audits the takeover mode and flags the IPv6 leak surface | same |
+| IP | Taken over by TUN / system proxy / `--proxy`; the toolkit audits the takeover mode | same |
+| IPv6 | Fetches the public IPv6 and **compares its geolocation to the exit country**: match = also tunneled (no leak); mismatch = bypassing the VPN and exposing your real ISP (real leak). Avoids the "any IPv6 = alarm" false positive | same |
 | WebRTC | `webrtc-leak-test.html` active detection: real STUN probe, compares srflx vs exit IP for a leak verdict; `browse-vpn --webrtc` runs it inside the real tunnel | same (pure front-end, identical cross-platform) |
 
 > Isolated Chrome profiles live in `chrome-<country>-profile/` (git-ignored, never committed).
