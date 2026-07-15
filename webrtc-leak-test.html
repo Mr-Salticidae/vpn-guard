@@ -150,6 +150,7 @@
   }
 
   // 1) 拉出口 IP（HTTP 路径，代表平台看到的 IP）——v4 + v6 都试
+  //    带 3.5s 超时中止：ipify 被挡/超时也不能拖住判定（否则整页卡在获取中）
   function fetchExit() {
     exitIPs = exitIPs || {};
     var pending = 2, got = {};
@@ -157,7 +158,10 @@
       if (--pending <= 0) { exitIPs = Object.keys(got).length ? got : false; render(); }
     }
     ["https://api.ipify.org?format=json", "https://api64.ipify.org?format=json"].forEach(function (u) {
-      fetch(u).then(function (r) { return r.json(); })
+      var ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+      var opt = ctrl ? { signal: ctrl.signal } : undefined;
+      if (ctrl) setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 3500);
+      fetch(u, opt).then(function (r) { return r.json(); })
         .then(function (j) { if (j && j.ip) got[j.ip] = 1; })
         .catch(function () {})
         .then(done);

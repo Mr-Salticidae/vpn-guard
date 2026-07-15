@@ -75,12 +75,17 @@ if grep -q '将使用' /tmp/bv.log; then ok "DryRun 走通并输出决策"; sed 
 
 echo; echo "==== 8) WebRTC 检测页冒烟（真 Chrome 跑完检测逻辑）===="
 if [ -n "$CHROME" ] && [ -f ./webrtc-leak-test.html ]; then
-  dom=$("$CHROME" --headless=new --disable-gpu --no-sandbox --virtual-time-budget=8000 \
-        --user-data-dir=/tmp/rtcsmoke --dump-dom "file://$PWD/webrtc-leak-test.html" 2>/dev/null)
-  v=$(printf '%s' "$dom" | grep -oE 'WEBRTC RESULT:[A-Z_]+' | head -1 | sed 's/.*://')
+  # 硬超时兜底：封了 STUN/出网时无头 Chrome 会卡住，20s 强杀，避免脚本挂起
+  "$CHROME" --headless=new --disable-gpu --no-sandbox --virtual-time-budget=8000 \
+        --user-data-dir=/tmp/rtcsmoke --dump-dom "file://$PWD/webrtc-leak-test.html" \
+        >/tmp/rtcsmoke.out 2>/dev/null &
+  cpid=$!; ( sleep 20; kill -9 $cpid 2>/dev/null ) & kpid=$!
+  wait $cpid 2>/dev/null || true; kill $kpid 2>/dev/null || true
+  v=$(grep -oE 'WEBRTC RESULT:[A-Z_]+' /tmp/rtcsmoke.out 2>/dev/null | head -1 | sed 's/.*://')
   case "$v" in
     OK|LEAK|NO_SRFLX|SRFLX_NO_EXITREF) ok "检测页跑到终态（判定=$v），逻辑无报错" ;;
-    *) no "检测页未跑到终态（判定=${v:-空}）——可能 JS 报错或 RTCPeerConnection 不可用" ;;
+    PENDING|UNSUPPORTED) no "检测页停在 ${v}——可能 JS 报错或 RTCPeerConnection 不可用" ;;
+    *) note "无终态输出（本机可能封了 STUN/出网），跳过冒烟" ;;
   esac
   note "无头下拿不到 STUN 反射候选属正常；真实泄露请用 ./browse-vpn.sh --webrtc 在真浏览器里判定"
 else
