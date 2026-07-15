@@ -190,7 +190,7 @@ fi
 if [ "$TAKEOVER" = "sysproxy" ]; then
     info "当前为系统代理模式：浏览器把域名交给代理远端解析，本地 DNS 主要影响直连/不走代理的应用。"
 fi
-info "提示：确认 Chrome 已关闭“安全 DNS(DoH)”，否则浏览器会绕过 VPN 自行解析。"
+info "提示：确认 Chrome 已关闭「安全 DNS(DoH)」，否则浏览器会绕过 VPN 自行解析。"
 dline
 head_ " 自查完成。红色=需处理，黄色=注意，绿色=通过。"
 echo ""

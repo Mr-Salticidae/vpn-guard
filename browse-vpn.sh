@@ -110,6 +110,8 @@ resp=$(curl -fsS --max-time 15 ${PROXY:+-x "$PROXY"} \
 ip_status=""; ip_country=""; ip_cc=""; ip_city=""; ip_tz=""; ip_offset=""; ip_isp=""; ip_query=""; ip_proxy=""; ip_hosting=""
 if [ -n "$resp" ]; then
     # 注意：ip-api 的 line 格式按其固定字段顺序返回（query 在最后），与请求参数顺序无关
+    # ip_isp 本脚本不展示，仅作占位以推进到后续字段（故 shellcheck 忽略未使用告警）
+    # shellcheck disable=SC2034
     { read -r ip_status; read -r ip_country; read -r ip_cc; read -r ip_city; read -r ip_tz
       read -r ip_offset; read -r ip_isp; read -r ip_proxy; read -r ip_hosting; read -r ip_query; } <<EOF
 $resp
