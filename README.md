@@ -4,6 +4,9 @@
 
 [English](README.en.md) | **中文**
 
+[![verify](https://github.com/Mr-Salticidae/vpn-guard/actions/workflows/verify.yml/badge.svg)](https://github.com/Mr-Salticidae/vpn-guard/actions/workflows/verify.yml)
+（每次推送在云端真实 macOS + Linux 上跑：语法 / shellcheck / 泄露自查 / 真 Chrome 遵从 `TZ` 验证）
+
 > **Windows / macOS / Linux** 用户在使用 VPN 访问**受地区限制的平台**时，用来自查真实身份是否泄露、
 > 并让浏览器指纹（时区 / 语言）与出口 IP 所在国**保持一致**的一组脚本。
 > Windows 用 PowerShell 版（`.ps1`），macOS / Linux 用 Bash 版（`.sh`），功能对等。

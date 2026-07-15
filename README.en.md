@@ -4,6 +4,9 @@
 
 **English** | [中文](README.md)
 
+[![verify](https://github.com/Mr-Salticidae/vpn-guard/actions/workflows/verify.yml/badge.svg)](https://github.com/Mr-Salticidae/vpn-guard/actions/workflows/verify.yml)
+(every push runs on real cloud macOS + Linux: syntax / shellcheck / leak audit / real-Chrome `TZ` verification)
+
 > A cross-platform toolkit (PowerShell for **Windows**, Bash for **macOS / Linux**) to
 > **audit VPN leaks** (IP / DNS / WebRTC / IPv6) and keep your browser fingerprint
 > (timezone / locale) **consistent with the exit-node country**, so geo-fingerprinting
