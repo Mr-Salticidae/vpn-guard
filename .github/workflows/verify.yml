@@ -1,0 +1,92 @@
+name: verify
+
+# 在真实的云端 macOS / Linux 上验证 Unix 版脚本。
+# 作者本地是 Windows，无 Mac/Linux 设备，靠这条流水线做真机回归。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 语法检查
+        run: |
+          bash -n vpn-leak-audit.sh
+          bash -n browse-vpn.sh
+          bash -n verify-unix.sh
+
+      - name: ShellCheck 静态分析
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S warning vpn-leak-audit.sh browse-vpn.sh verify-unix.sh
+          else
+            echo "shellcheck 不可用，跳过（非本平台预装）"
+          fi
+
+      - name: 安装 Chrome (macOS)
+        if: runner.os == 'macOS'
+        run: brew install --cask google-chrome
+
+      - name: 定位 Chrome (Linux)
+        if: runner.os == 'Linux'
+        run: which google-chrome google-chrome-stable chromium chromium-browser || true
+
+      - name: 泄露自查（只读）
+        run: bash ./vpn-leak-audit.sh | tee audit.out
+
+      - name: 断言 DNS 一节无非法 token（回归 resolvectl 链路编号 bug）
+        shell: bash
+        run: |
+          bad=$(grep -oE 'DNS: [^ ]+' audit.out | awk '{print $2}' \
+                | grep -vE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || true)
+          if [ -n "$bad" ]; then
+            echo "发现非 IPv4 的 DNS token（解析有杂质）："; echo "$bad"; exit 1
+          fi
+          echo "DNS token 全部合法（或本机无 DNS 输出）"
+
+      - name: browse-vpn 决策（--dry-run，强制 US 保证确定性）
+        shell: bash
+        run: |
+          out=$(bash ./browse-vpn.sh US --dry-run)
+          echo "$out"
+          echo "$out" | grep -q '将使用' || { echo "未产出时区/语言决策"; exit 1; }
+
+      - name: verify-unix.sh 汇总（信息性）
+        run: bash ./verify-unix.sh
+
+      - name: 核心卖点验证 —— 真 Chrome 是否遵从 TZ 环境变量
+        shell: bash
+        run: |
+          set -e
+          CHROME=""
+          for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+                   google-chrome google-chrome-stable chromium chromium-browser; do
+            if [ -x "$c" ]; then CHROME=$c; break; fi
+            if command -v "$c" >/dev/null 2>&1; then CHROME=$(command -v "$c"); break; fi
+          done
+          echo "Chrome: $CHROME"
+          [ -n "$CHROME" ] || { echo "未找到 Chrome，无法验证"; exit 1; }
+          html='data:text/html,<html><body id=x></body><script>document.getElementById("x").textContent=Intl.DateTimeFormat().resolvedOptions().timeZone</script></html>'
+          run_tz() {
+            TZ="$1" "$CHROME" --headless=new --disable-gpu --no-sandbox \
+              --virtual-time-budget=2000 --dump-dom "$html" 2>/dev/null \
+              | grep -oE 'Asia/Tokyo|America/New_York|Europe/London|UTC' | head -1
+          }
+          tokyo=$(run_tz Asia/Tokyo)
+          ny=$(run_tz America/New_York)
+          echo "TZ=Asia/Tokyo → ${tokyo:-<空>}    TZ=America/New_York → ${ny:-<空>}"
+          if [ "$tokyo" = "Asia/Tokyo" ] && [ "$ny" = "America/New_York" ]; then
+            echo "✅ PASS：$(uname) 上真 Chrome 遵从 TZ —— browse-vpn.sh 的时区机制成立"
+          else
+            echo "❌ FAIL：Chrome 未按 TZ 报告时区"; exit 1
+          fi
