@@ -41,8 +41,8 @@ jobs:
         if: runner.os == 'Linux'
         run: which google-chrome google-chrome-stable chromium chromium-browser || true
 
-      - name: 泄露自查（只读）
-        run: bash ./vpn-leak-audit.sh | tee audit.out
+      - name: 泄露自查（只读；DNS 主动实测另测，此处跳过保持确定性）
+        run: bash ./vpn-leak-audit.sh --no-dns-leak | tee audit.out
 
       - name: 断言 DNS 一节无非法 token（回归 resolvectl 链路编号 bug）
         shell: bash
@@ -53,6 +53,19 @@ jobs:
             echo "发现非 IPv4 的 DNS token（解析有杂质）："; echo "$bad"; exit 1
           fi
           echo "DNS token 全部合法（或本机无 DNS 输出）"
+
+      - name: DNS 泄露主动实测冒烟（bash.ws，最佳努力）
+        shell: bash
+        run: |
+          # 跑带 DNS 主动实测的完整自查，只断言该代码路径产出了可识别结果
+          # （列出解析器 / 判定未泄露 / 或 bash.ws 不可达时优雅跳过），不因外部服务波动而挂 CI。
+          out=$(bash ./vpn-leak-audit.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+          printf '%s\n' "$out" | grep -E '主动实测|解析器|未泄露|不可达|未取到|未观察到' || true
+          if printf '%s' "$out" | grep -qE '解析器 |DNS 未泄露|bash\.ws 不可达|未取到 bash\.ws|未观察到实际解析器'; then
+            echo "✅ PASS：$(uname) 上 DNS 主动实测代码路径正常（判定或优雅跳过均可）"
+          else
+            echo "❌ FAIL：DNS 主动实测未产出任何结构化结果"; exit 1
+          fi
 
       - name: browse-vpn 决策（--dry-run，强制 US 保证确定性）
         shell: bash

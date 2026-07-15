@@ -33,7 +33,63 @@ zone_to_seconds() {
 }
 fmt_utc() { printf 'UTC%+d:00' "$(( $1 / 3600 ))"; }
 
+# ---- 参数 ----
+DNS_LEAK=1
+for a in "$@"; do
+    case "$a" in
+        --no-dns-leak) DNS_LEAK=0 ;;
+        -h|--help) echo "用法: ./vpn-leak-audit.sh [--no-dns-leak]"; echo "  --no-dns-leak  跳过联网的 DNS 泄露主动实测（默认开启，走 bash.ws）"; exit 0 ;;
+        *) echo "未知参数: $a（可用 --no-dns-leak）" >&2; exit 1 ;;
+    esac
+done
+
 AUDIT_DIR=$(cd "$(dirname "$0")" && pwd)
+
+# ---- DNS 泄露主动实测：对随机子域发起真实解析，回查是哪些解析器应答（含归属国/ASN）----
+# 用 bash.ws（dnsleaktest.com 官方 CLI 同源）的免费 API，无需自建权威 DNS。
+dns_leak_test() {
+    local exit_cc="$1" exit_name="$2" id json rows i
+    id=$(curl -fsS --max-time 8 "https://bash.ws/id" 2>/dev/null)
+    if [ -z "$id" ]; then warn "bash.ws 不可达 —— 跳过 DNS 主动实测"; return; fi
+    # 触发解析：curl 走 getaddrinfo，最贴近应用实际行为（子域无 HTTP 服务，连接失败无妨，解析已发生）
+    for i in 1 2 3 4 5 6; do curl -fsS --max-time 4 "http://$i.$id.bash.ws" >/dev/null 2>&1 & done
+    wait
+    json=$(curl -fsS --max-time 10 "https://bash.ws/dnsleak/test/$id?json" 2>/dev/null)
+    if [ -z "$json" ]; then warn "未取到 bash.ws 结果 —— 跳过"; return; fi
+    rows=$(printf '%s' "$json" | sed 's/},{/}\n{/g')
+    # 出口国兜底：ip-api 若失败，用 bash.ws 自己回报的公网 IP 归属
+    if [ -z "$exit_cc" ]; then
+        exit_cc=$(printf '%s' "$rows"  | grep '"type":"ip"' | head -1 | sed -E 's/.*"country":"([^"]*)".*/\1/')
+        exit_name=$(printf '%s' "$rows"| grep '"type":"ip"' | head -1 | sed -E 's/.*"country_name":"([^"]*)".*/\1/')
+    fi
+    local up_exit; up_exit=$(printf '%s' "$exit_cc" | tr '[:lower:]' '[:upper:]')
+    local dns_count=0 mismatch=0
+    while IFS= read -r obj; do
+        case "$obj" in *'"type":"dns"'*) ;; *) continue ;; esac
+        local rip rcc rname rasn
+        rip=$(printf '%s'   "$obj" | sed -E 's/.*"ip":"([^"]*)".*/\1/')
+        rcc=$(printf '%s'   "$obj" | sed -E 's/.*"country":"([^"]*)".*/\1/' | tr '[:lower:]' '[:upper:]')
+        rname=$(printf '%s' "$obj" | sed -E 's/.*"country_name":"([^"]*)".*/\1/')
+        rasn=$(printf '%s'  "$obj" | sed -E 's/.*"asn":"([^"]*)".*/\1/')
+        dns_count=$((dns_count + 1))
+        if [ -n "$up_exit" ] && [ -n "$rcc" ] && [ "$rcc" != "$up_exit" ]; then
+            mismatch=$((mismatch + 1))
+            bad "解析器 $rip（$rname / $rasn）不在出口国 $exit_name —— DNS 正泄露到此解析器"
+        else
+            info "解析器 $rip（$rname / $rasn）"
+        fi
+    done <<EOF
+$rows
+EOF
+    if [ "$dns_count" -eq 0 ]; then
+        warn "未观察到实际解析器（可能全部命中缓存或被完全隧道）——可稍后重试确认"
+    elif [ "$mismatch" -eq 0 ]; then
+        ok "全部解析器都在出口国 $exit_name —— DNS 未泄露"
+    else
+        bad "共 $mismatch/$dns_count 个解析器不在出口国 —— 你查询的域名正暴露给上述解析器（多为真实 ISP）"
+        info "修复：客户端启用 fake-ip + 远端解析（让 DNS 走隧道在出口解析），并确认没有应用绕过隧道直连本地 DNS。"
+    fi
+}
 find_chrome() {
     local c
     case "$(uname)" in
@@ -204,6 +260,13 @@ if [ "$TAKEOVER" = "sysproxy" ]; then
     info "当前为系统代理模式：浏览器把域名交给代理远端解析，本地 DNS 主要影响直连/不走代理的应用。"
 fi
 info "提示：确认 Chrome 已关闭「安全 DNS(DoH)」，否则浏览器会绕过 VPN 自行解析。"
+if [ "$DNS_LEAK" = "1" ]; then
+    echo ""
+    info "主动实测（触发真实解析，看解析器归属国 · 联网 bash.ws，约 10s；--no-dns-leak 可跳过）……"
+    dns_leak_test "$ip_cc" "$ip_country"
+else
+    info "已跳过 DNS 主动实测（--no-dns-leak）。上面仅为本地 DNS 配置的静态判断。"
+fi
 line
 
 # ---------- 6. WebRTC 泄露（主动检测，需真实浏览器）----------

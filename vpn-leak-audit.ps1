@@ -3,8 +3,11 @@
   用途：使用 VPN 访问受地区限制的海外平台前，一键检查真实身份是否泄露、
         以及浏览器指纹（时区/语言）是否与出口 IP 所在国一致。
   用法：右键“用 PowerShell 运行”，或在终端执行  powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1
+        加 -NoDnsLeak 可跳过联网的 DNS 泄露主动实测（默认开启，走 bash.ws）。
   只读检查，不修改任何系统设置。
 #>
+
+param([switch]$NoDnsLeak)
 
 $ErrorActionPreference = 'SilentlyContinue'
 function Line($c='-'){ Write-Host ($c * 60) -ForegroundColor DarkGray }
@@ -12,6 +15,54 @@ function Ok($m){ Write-Host "  [ OK ] $m" -ForegroundColor Green }
 function Warn($m){ Write-Host "  [WARN] $m" -ForegroundColor Yellow }
 function Bad($m){ Write-Host "  [FAIL] $m" -ForegroundColor Red }
 function Info($m){ Write-Host "  $m" -ForegroundColor Gray }
+
+# DNS 泄露主动实测：对随机子域发起真实解析，回查哪些解析器应答（含归属国/ASN）。
+# 用 bash.ws（dnsleaktest.com 官方 CLI 同源）的免费 API，无需自建权威 DNS。
+function Invoke-DnsLeakTest($exitCc, $exitName) {
+    $id = try { (Invoke-RestMethod -Uri "https://bash.ws/id" -TimeoutSec 8) } catch { $null }
+    if (-not $id) { Warn "bash.ws 不可达 —— 跳过 DNS 主动实测"; return }
+    $id = "$id".Trim()
+    # 触发解析：必须发起“连接”而非仅解析 —— fake-ip 下真实递归查询在连接时才由客户端发出。
+    # 优先用 Windows 自带 curl.exe（可后台并发，等价 bash 版）；否则回退 Invoke-WebRequest。
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        1..6 | ForEach-Object {
+            Start-Process -FilePath curl.exe -NoNewWindow `
+                -ArgumentList @("-fsS","--max-time","4","http://$_.$id.bash.ws") | Out-Null
+        }
+        Start-Sleep -Seconds 4
+    } else {
+        1..6 | ForEach-Object {
+            try { Invoke-WebRequest -Uri "http://$_.$id.bash.ws" -TimeoutSec 4 -UseBasicParsing | Out-Null } catch {}
+        }
+    }
+    $res = try { Invoke-RestMethod -Uri "https://bash.ws/dnsleak/test/$id`?json" -TimeoutSec 10 } catch { $null }
+    if (-not $res) { Warn "未取到 bash.ws 结果 —— 跳过"; return }
+    if (-not $exitCc) {
+        $ipEntry = $res | Where-Object { $_.type -eq 'ip' } | Select-Object -First 1
+        if ($ipEntry) { $exitCc = $ipEntry.country; $exitName = $ipEntry.country_name }
+    }
+    $upExit = ("$exitCc").ToUpper()
+    $dns = @($res | Where-Object { $_.type -eq 'dns' })
+    $mismatch = 0
+    foreach ($d in $dns) {
+        $rcc = ("$($d.country)").ToUpper()
+        if ($upExit -and $rcc -and $rcc -ne $upExit) {
+            $mismatch++
+            Bad ("解析器 {0}（{1} / {2}）不在出口国 {3} —— DNS 正泄露到此解析器" -f $d.ip, $d.country_name, $d.asn, $exitName)
+        } else {
+            Info ("解析器 {0}（{1} / {2}）" -f $d.ip, $d.country_name, $d.asn)
+        }
+    }
+    if ($dns.Count -eq 0) {
+        Warn "未观察到实际解析器（可能全部命中缓存或被完全隧道）——可稍后重试确认"
+    } elseif ($mismatch -eq 0) {
+        Ok ("全部解析器都在出口国 {0} —— DNS 未泄露" -f $exitName)
+    } else {
+        Bad ("共 {0}/{1} 个解析器不在出口国 —— 你查询的域名正暴露给上述解析器（多为真实 ISP）" -f $mismatch, $dns.Count)
+        Info "修复：客户端启用 fake-ip + 远端解析（让 DNS 走隧道在出口解析），并确认没有应用绕过隧道直连本地 DNS。"
+    }
+}
 
 Write-Host ""
 Write-Host " VPN 出口一致性 / 泄露自查 " -ForegroundColor Cyan
@@ -128,6 +179,15 @@ if ($TakeoverMode -eq 'sysproxy') {
     Info "当前为系统代理模式：浏览器把域名交给代理远端解析，本地 DNS 主要影响直连/不走代理的应用。"
 }
 Info "提示：确认 Chrome 已关闭“安全 DNS(DoH)”，否则浏览器会绕过 VPN 自行解析。"
+if (-not $NoDnsLeak) {
+    Write-Host ""
+    Info "主动实测（触发真实解析，看解析器归属国 · 联网 bash.ws，约 10s；-NoDnsLeak 可跳过）……"
+    $exitCc = if ($ipapi -and $ipapi.status -eq 'success') { $ipapi.countryCode } else { "" }
+    $exitName = if ($ipapi -and $ipapi.status -eq 'success') { $ipapi.country } else { "" }
+    Invoke-DnsLeakTest $exitCc $exitName
+} else {
+    Info "已跳过 DNS 主动实测（-NoDnsLeak）。上面仅为本地 DNS 配置的静态判断。"
+}
 Line
 
 # ---------- 6. WebRTC 泄露（主动检测，需真实浏览器）----------

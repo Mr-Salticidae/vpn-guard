@@ -64,17 +64,26 @@ directly, no path edits needed.
 ```powershell
 # Windows
 powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1
+powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoDnsLeak  # skip the networked DNS test
 ```
 ```bash
 # macOS / Linux
 ./vpn-leak-audit.sh
+./vpn-leak-audit.sh --no-dns-leak   # skip the networked DNS test
 ```
 
 Reports with red / yellow / green: **detected proxy client and traffic-takeover mode**
 (TUN / system proxy / none — each with its leak surface), public IP + geolocation,
 proxy/hosting flags, IPv6 leak surface, **timezone consistency** (system vs exit IP),
-locale consistency, whether DNS resolution leaks to your local ISP, and a
+locale consistency, DNS resolution path (static config + **active DNS-leak test**), and a
 **WebRTC active-detection entry point**. Re-run after switching nodes or countries.
+
+> **Active DNS-leak test** (on by default): triggers real resolution of random subdomains and
+> checks *which resolvers actually answered* (with country / ASN), comparing them to the exit
+> country — catching leaks that passive config-reading misses (config *looks* tunneled but
+> resolution actually leaks to your local ISP). Uses the free [bash.ws](https://bash.ws) API
+> (same one dnsleaktest.com's official CLI uses); it only sends random subdomains, no personal
+> data. Skip it with `--no-dns-leak` / `-NoDnsLeak`.
 
 <details>
 <summary>Sample output (illustrative, not real data)</summary>
@@ -90,7 +99,8 @@ locale consistency, whether DNS resolution leaks to your local ISP, and a
 2) IPv6 leak surface   [ OK ] no public IPv6 egress
 3) Timezone check      [FAIL] system UTC+8 vs exit UTC+9, off by +1h  ← #1 giveaway
 4) Language / locale   [WARN] browser default language doesn't match exit country
-5) DNS resolution path [ OK ] fake-ip tunnel resolution
+5) DNS resolution path [ OK ] fake-ip tunnel resolution (static config)
+   Active DNS-leak test [FAIL] resolvers in China but exit is Japan — DNS leaking to local ISP
 6) WebRTC leak surface [ OK ] test page ready — run: browse-vpn --webrtc
 ```
 </details>
@@ -180,7 +190,8 @@ in `browse-vpn.sh`.
 |---|---|---|
 | Timezone | `tzutil /s` temporarily switches the system timezone (Chrome ignores `TZ`), auto-restored via `finally` when the session ends | Chrome launched with `TZ=<IANA timezone>` — process-scoped, system timezone untouched |
 | Language | Chrome `--lang` / `--accept-lang` + `intl.selected_languages` in the isolated profile; system locale untouched | same |
-| DNS | "Secure DNS (DoH)" disabled in the isolated Chrome profile, forcing system DNS (TUN mode = fake-ip tunnel; in system-proxy mode hostnames are resolved remotely by the proxy), so the browser can't leak its own lookups | same |
+| DNS (static) | "Secure DNS (DoH)" disabled in the isolated Chrome profile, forcing system DNS (TUN mode = fake-ip tunnel; in system-proxy mode hostnames are resolved remotely by the proxy), so the browser can't leak its own lookups | same |
+| DNS (active test) | Triggers real connections to random subdomains to force recursive resolution, then uses bash.ws to look up which resolvers actually answered (country/ASN) and compares to the exit country | same (curl-triggered, identical logic) |
 | IP | Taken over by TUN / system proxy / `--proxy`; the toolkit audits the takeover mode and flags the IPv6 leak surface | same |
 | WebRTC | `webrtc-leak-test.html` active detection: real STUN probe, compares srflx vs exit IP for a leak verdict; `browse-vpn --webrtc` runs it inside the real tunnel | same (pure front-end, identical cross-platform) |
 
@@ -203,6 +214,11 @@ in `browse-vpn.sh`.
   OpenVPN); the `198.18.x` fake-ip signature covers Clash/Mihomo/sing-box/Xray fakedns.
 - In system-proxy mode the browser is safe, but UDP/WebRTC and proxy-unaware apps may
   bypass the proxy — enable your client's TUN mode for full coverage.
+- The active DNS-leak test relies on the third-party [bash.ws](https://bash.ws) service (a
+  default network call like ip-api / ipify): it only sends random subdomain probes, uploads no
+  personal data, and the service only sees your resolver IPs (which is the point). Pass
+  `--no-dns-leak` to skip. Under fake-ip, if resolvers still show up as local, it's usually the
+  client's DNS using a domestic upstream — follow the hint to route DNS through the tunnel.
 
 ## License
 
