@@ -59,9 +59,12 @@ jobs:
         run: |
           # 跑带 DNS 主动实测的完整自查，只断言该代码路径产出了可识别结果
           # （列出解析器 / 判定未泄露 / 或 bash.ws 不可达时优雅跳过），不因外部服务波动而挂 CI。
-          out=$(bash ./vpn-leak-audit.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
-          printf '%s\n' "$out" | grep -E '主动实测|解析器|未泄露|不可达|未取到|未观察到' || true
-          if printf '%s' "$out" | grep -qE '解析器 |DNS 未泄露|bash\.ws 不可达|未取到 bash\.ws|未观察到实际解析器'; then
+          # 不做去色处理：颜色码在中文文本之外，grep 直接匹配原始输出即可
+          # （macOS 的 BSD sed 在 C locale 下对多字节会报 illegal byte sequence）。
+          export LC_ALL=C
+          out=$(bash ./vpn-leak-audit.sh 2>/dev/null || true)
+          printf '%s\n' "$out" | grep -aE '主动实测|解析器|未泄露|不可达|未取到|未观察到' || true
+          if printf '%s' "$out" | grep -aqE '解析器 |DNS 未泄露|bash\.ws 不可达|未取到 bash\.ws|未观察到实际解析器'; then
             echo "✅ PASS：$(uname) 上 DNS 主动实测代码路径正常（判定或优雅跳过均可）"
           else
             echo "❌ FAIL：DNS 主动实测未产出任何结构化结果"; exit 1
