@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebRTC 泄露主动检测 · vpn-guard</title>
+<style>
+  :root { color-scheme: dark light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.6 -apple-system, "Segoe UI", Roboto, "Microsoft YaHei", sans-serif;
+         background: #14161a; color: #e6e8eb; padding: 24px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #9aa0a6; font-size: 13px; margin: 0 0 20px; }
+  .verdict { border-radius: 10px; padding: 18px 20px; margin: 0 0 20px; font-size: 17px; font-weight: 600;
+             border: 1px solid transparent; }
+  .verdict.ok    { background: #12301c; border-color: #1f7a3f; color: #7ee2a0; }
+  .verdict.leak  { background: #341417; border-color: #a3312f; color: #ff8a86; }
+  .verdict.warn  { background: #332a11; border-color: #9a7d1f; color: #f2d071; }
+  .verdict.wait  { background: #1b2430; border-color: #35506f; color: #86b6ff; }
+  .verdict small { display: block; font-weight: 400; font-size: 13px; margin-top: 6px; color: inherit; opacity: .9; }
+  table { width: 100%; border-collapse: collapse; margin: 0 0 20px; font-size: 14px; }
+  td, th { text-align: left; padding: 8px 10px; border-bottom: 1px solid #262a30; vertical-align: top; }
+  th { color: #9aa0a6; font-weight: 500; width: 190px; }
+  code { font-family: "SF Mono", Consolas, monospace; }
+  .ip-leak { color: #ff8a86; font-weight: 600; }
+  .ip-ok   { color: #7ee2a0; }
+  .muted { color: #9aa0a6; }
+  .note { font-size: 13px; color: #9aa0a6; border-top: 1px solid #262a30; padding-top: 14px; }
+  #result { margin-top: 16px; font-size: 12px; color: #6b7178; word-break: break-all; }
+  a { color: #86b6ff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>WebRTC 泄露主动检测</h1>
+  <p class="sub">在当前浏览器里发起真实的 STUN 探测，看 WebRTC 暴露的公网 IP 是否与你的 VPN 出口一致。
+    <br>WebRTC leak test — compares the public IP WebRTC exposes (via STUN/UDP) against your VPN exit IP.</p>
+
+  <div id="verdict" class="verdict wait">正在探测…<small>创建 RTCPeerConnection、收集 ICE 候选、对比出口 IP，约需 2–4 秒。</small></div>
+
+  <table>
+    <tr><th>出口 IP（HTTP，走隧道）</th><td id="exit" class="muted">获取中…</td></tr>
+    <tr><th>WebRTC 反射候选 srflx<br>（STUN 看到的公网 IP）</th><td id="srflx" class="muted">收集中…</td></tr>
+    <tr><th>本地候选 host</th><td id="host" class="muted">收集中…</td></tr>
+  </table>
+
+  <p class="note">
+    原理：WebRTC 为了打洞会通过 STUN 服务器发 UDP，拿回"公网看到的你的 IP"（srflx 候选）。
+    如果这条 UDP 没走 VPN 隧道，srflx 就会是你的<strong>真实 IP</strong>，即便网页用 HTTP 看到的是出口 IP——
+    这就是经典的 WebRTC 泄露。<br>
+    · <strong>一致</strong>：srflx 与出口 IP 相同，UDP 也在隧道内，安全。<br>
+    · <strong>泄露</strong>：srflx 出现了与出口不同的公网 IP，真实身份正通过 WebRTC 暴露。<br>
+    · <strong>无 srflx</strong>：没拿到反射候选，通常表示 UDP 被完全隧道/拦截（多为好事），或 STUN 不可达。<br>
+    修复：浏览器层用扩展禁用 WebRTC，或让客户端以 TUN 模式接管全局 UDP（系统代理模式挡不住 WebRTC）。
+  </p>
+
+  <pre id="result">RESULT:PENDING</pre>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var STUN = [
+    "stun:stun.l.google.com:19302",
+    "stun:stun1.l.google.com:19302",
+    "stun:stun.cloudflare.com:3478"
+  ];
+  var host = {}, srflx = {};           // 用对象当集合（去重）
+  var exitIPs = null;                   // 来自 HTTP 的出口 IP 集合
+  var finished = false;
+
+  function isPrivate(ip) {
+    if (ip.indexOf(":") >= 0) {         // IPv6
+      var l = ip.toLowerCase();
+      return l === "::1" || l.indexOf("fe80:") === 0 ||
+             l.indexOf("fc") === 0 || l.indexOf("fd") === 0;
+    }
+    return /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(ip);
+  }
+
+  function parseCandidate(cand) {
+    var p = cand.split(" ");
+    // candidate:<found> <comp> <transport> <prio> <IP> <port> typ <type> ...
+    if (p.length < 8) return null;
+    return { ip: p[4], typ: p[7] };
+  }
+
+  function render() {
+    var hostList = Object.keys(host), srflxList = Object.keys(srflx);
+
+    document.getElementById("host").innerHTML = hostList.length
+      ? hostList.map(function (i) { return "<code>" + i + "</code>"; }).join("<br>")
+      : '<span class="muted">无（现代浏览器默认用 mDNS 隐藏本地 IP，属正常）</span>';
+
+    var exitArr = exitIPs ? Object.keys(exitIPs) : [];
+    document.getElementById("exit").innerHTML = exitArr.length
+      ? exitArr.map(function (i) { return "<code>" + i + "</code>"; }).join("<br>")
+      : (exitIPs === null ? '<span class="muted">获取中…</span>'
+                          : '<span class="muted">未取到（不影响 srflx 判定，仅少了对比基准）</span>');
+
+    // 判定
+    var leaking = srflxList.filter(function (ip) {
+      return !isPrivate(ip) && exitIPs && !exitIPs[ip];
+    });
+    var srflxHtml = srflxList.length
+      ? srflxList.map(function (ip) {
+          var leak = leaking.indexOf(ip) >= 0;
+          return '<code class="' + (leak ? "ip-leak" : (exitIPs ? "ip-ok" : "")) + '">' + ip +
+                 (leak ? " ← 泄露" : "") + "</code>";
+        }).join("<br>")
+      : '<span class="muted">无</span>';
+    document.getElementById("srflx").innerHTML = srflxHtml;
+
+    var v = document.getElementById("verdict"), verdict, cls, msg, sub;
+    if (!finished) {
+      cls = "wait"; verdict = "PENDING"; msg = "正在探测…"; sub = "";
+    } else if (srflxList.length === 0) {
+      cls = "warn"; verdict = "NO_SRFLX";
+      msg = "未拿到 WebRTC 反射候选";
+      sub = "UDP 被完全隧道/拦截（多为好事），或 STUN 不可达。此浏览器没有通过 WebRTC 暴露公网 IP。";
+    } else if (!exitIPs) {
+      cls = "warn"; verdict = "SRFLX_NO_EXITREF";
+      msg = "拿到 srflx，但未取到出口 IP 无法比对";
+      sub = "srflx 公网 IP：" + srflxList.join(", ") + "。请手动确认它是否等于你的 VPN 出口 IP。";
+    } else if (leaking.length > 0) {
+      cls = "leak"; verdict = "LEAK";
+      msg = "⚠ WebRTC 泄露：暴露了与出口不同的公网 IP";
+      sub = "泄露 IP：" + leaking.join(", ") + " —— 这很可能是你的真实地址，正绕过 VPN 通过 WebRTC 外泄。";
+    } else {
+      cls = "ok"; verdict = "OK";
+      msg = "✓ 一致：WebRTC 公网 IP 与 VPN 出口相同";
+      sub = "srflx 与出口 IP 一致，UDP 也在隧道内，无泄露。";
+    }
+    v.className = "verdict " + cls;
+    v.innerHTML = msg + (sub ? "<small>" + sub + "</small>" : "");
+
+    document.title = "WEBRTC RESULT:" + verdict;
+    document.getElementById("result").textContent =
+      "RESULT:" + verdict +
+      " exit=" + (exitArr.length ? exitArr.join(",") : "?") +
+      " srflx=" + (srflxList.length ? srflxList.join(",") : "-") +
+      " leak=" + (leaking.length ? leaking.join(",") : "-");
+  }
+
+  function finish() {
+    if (finished) return;
+    finished = true;
+    render();
+  }
+
+  // 1) 拉出口 IP（HTTP 路径，代表平台看到的 IP）——v4 + v6 都试
+  function fetchExit() {
+    exitIPs = exitIPs || {};
+    var pending = 2, got = {};
+    function done() {
+      if (--pending <= 0) { exitIPs = Object.keys(got).length ? got : false; render(); }
+    }
+    ["https://api.ipify.org?format=json", "https://api64.ipify.org?format=json"].forEach(function (u) {
+      fetch(u).then(function (r) { return r.json(); })
+        .then(function (j) { if (j && j.ip) got[j.ip] = 1; })
+        .catch(function () {})
+        .then(done);
+    });
+  }
+
+  // 2) 收集 ICE 候选
+  function gather() {
+    var pc;
+    try {
+      pc = new RTCPeerConnection({ iceServers: [{ urls: STUN }] });
+    } catch (e) {
+      finished = true;
+      document.getElementById("verdict").className = "verdict warn";
+      document.getElementById("verdict").textContent = "此浏览器不支持 RTCPeerConnection，无法检测。";
+      document.title = "WEBRTC RESULT:UNSUPPORTED";
+      document.getElementById("result").textContent = "RESULT:UNSUPPORTED";
+      return;
+    }
+    pc.onicecandidate = function (e) {
+      if (!e.candidate || !e.candidate.candidate) { render(); return; }
+      var info = parseCandidate(e.candidate.candidate);
+      if (!info || !info.ip || info.ip.indexOf(".local") >= 0) return;
+      if (info.typ === "host") host[info.ip] = 1;
+      else if (info.typ === "srflx") srflx[info.ip] = 1;
+      render();
+    };
+    pc.onicegatheringstatechange = function () {
+      if (pc.iceGatheringState === "complete") finish();
+    };
+    try { pc.createDataChannel("x"); } catch (e) {}
+    pc.createOffer().then(function (o) { return pc.setLocalDescription(o); })
+      .catch(function () {});
+  }
+
+  fetchExit();
+  gather();
+  // 兜底：无论 STUN 是否回全，4.5s 后定判（headless/CI 也据此拿到结果）
+  setTimeout(finish, 4500);
+})();
+</script>
+</body>
+</html>

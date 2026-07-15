@@ -15,6 +15,7 @@
 param(
     [string]$Country = "",   # 留空=自动探测；或 JP/US/SG/HK/TW/KR/GB/DE/FR/NL/CA/AU
     [string]$Proxy   = "",   # 传给 Chrome --proxy-server，如 socks5://127.0.0.1:10808
+    [switch]$WebRTC,         # 附带打开 WebRTC 泄露主动检测页
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -158,6 +159,15 @@ try {
     Write-Host "正在启动一致性 Chrome 会话……关闭该 Chrome 窗口后时区会自动还原。" -ForegroundColor Cyan
     $args = @("--user-data-dir=$profileDir", "--lang=$($lang.Split(',')[0])", "--accept-lang=$lang", "--no-first-run", "--no-default-browser-check")
     if ($Proxy) { $args += "--proxy-server=$Proxy" }
+    if ($WebRTC) {
+        $rtcPage = Join-Path $BaseDir "webrtc-leak-test.html"
+        if (Test-Path $rtcPage) {
+            $args += ("file:///" + ($rtcPage -replace '\\','/'))
+            Write-Host "已附带打开 WebRTC 泄露主动检测页（在本会话/隧道内实测 UDP 是否泄露真实 IP）" -ForegroundColor Cyan
+        } else {
+            Write-Host "未找到 webrtc-leak-test.html，跳过 WebRTC 检测页。" -ForegroundColor Yellow
+        }
+    }
     Start-Process -FilePath $Chrome -ArgumentList $args -Wait
 }
 finally {

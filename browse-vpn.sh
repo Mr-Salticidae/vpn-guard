@@ -21,14 +21,15 @@
 set -u
 
 # ---- 参数 ----
-COUNTRY=""; DRYRUN=0; PROXY=""
+COUNTRY=""; DRYRUN=0; PROXY=""; WEBRTC=0
 for a in "$@"; do
     case "$a" in
         --dry-run|-DryRun) DRYRUN=1 ;;
+        --webrtc|-WebRTC)  WEBRTC=1 ;;
         --country=*)       COUNTRY=${a#*=} ;;
         --proxy=*)         PROXY=${a#*=} ;;
         [A-Za-z][A-Za-z])  COUNTRY=$a ;;
-        *) echo "未知参数: $a   用法: ./browse-vpn.sh [国家码] [--dry-run] [--proxy=socks5://127.0.0.1:端口]" >&2; exit 1 ;;
+        *) echo "未知参数: $a   用法: ./browse-vpn.sh [国家码] [--dry-run] [--webrtc] [--proxy=socks5://127.0.0.1:端口]" >&2; exit 1 ;;
     esac
 done
 COUNTRY=$(echo "$COUNTRY" | tr '[:lower:]' '[:upper:]')
@@ -186,12 +187,22 @@ fi
 
 # ---- 5) 启动（TZ 只作用于这个 Chrome 进程，系统时区不受影响，无需还原）----
 echo "${C_CYAN}正在启动一致性 Chrome 会话……（TZ 仅对该进程生效，关闭窗口即结束）${C_RESET}"
+start_url=""
+if [ "$WEBRTC" -eq 1 ]; then
+    if [ -f "$BASE_DIR/webrtc-leak-test.html" ]; then
+        start_url="file://$BASE_DIR/webrtc-leak-test.html"
+        echo "${C_CYAN}已附带打开 WebRTC 泄露主动检测页（在本会话/隧道内实测 UDP 是否泄露真实 IP）${C_RESET}"
+    else
+        echo "${C_YELLOW}未找到 webrtc-leak-test.html，跳过 WebRTC 检测页。${C_RESET}"
+    fi
+fi
 TZ=$tz "$CHROME" \
     --user-data-dir="$profile_dir" \
     --lang="${lang%%,*}" \
     --accept-lang="$lang" \
     --no-first-run \
     --no-default-browser-check \
-    ${PROXY:+--proxy-server="$PROXY"} >/dev/null 2>&1
+    ${PROXY:+--proxy-server="$PROXY"} \
+    ${start_url:+"$start_url"} >/dev/null 2>&1
 echo "${C_GREEN}会话结束。系统时区从未被改动。${C_RESET}"
 echo "${C_GRAY}建议关闭前在目标平台点一次登出，避免会话 cookie 跨时区复用。${C_RESET}"

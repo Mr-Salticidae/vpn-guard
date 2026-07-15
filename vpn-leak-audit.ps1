@@ -128,6 +128,25 @@ if ($TakeoverMode -eq 'sysproxy') {
     Info "当前为系统代理模式：浏览器把域名交给代理远端解析，本地 DNS 主要影响直连/不走代理的应用。"
 }
 Info "提示：确认 Chrome 已关闭“安全 DNS(DoH)”，否则浏览器会绕过 VPN 自行解析。"
+Line
+
+# ---------- 6. WebRTC 泄露（主动检测，需真实浏览器）----------
+Write-Host "6) WebRTC 泄露面（主动检测）" -ForegroundColor Cyan
+Info "WebRTC 是浏览器 API，需在真实浏览器里发 STUN 才能实测，命令行只读检查覆盖不到。"
+$rtcPage = Join-Path $PSScriptRoot "webrtc-leak-test.html"
+if (Test-Path $rtcPage) {
+    $Chrome = @(
+        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($Chrome) { Ok "检测页已就绪：webrtc-leak-test.html（已找到 Chrome）" }
+    else { Warn "检测页已就绪：webrtc-leak-test.html（未找到 Chrome，请用任意浏览器打开）" }
+    Info "实测（推荐，在真实隧道内跑）：browse-vpn.ps1 -WebRTC"
+    Info "或直接双击 webrtc-leak-test.html —— 会自动对比 WebRTC 公网 IP 与出口 IP 并给出判定。"
+} else {
+    Warn "未找到 webrtc-leak-test.html —— 请从仓库获取该检测页。"
+}
 Line '='
 Write-Host " 自查完成。红色=需处理，黄色=注意，绿色=通过。" -ForegroundColor Cyan
 Write-Host ""

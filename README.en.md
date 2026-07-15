@@ -73,8 +73,8 @@ powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1
 Reports with red / yellow / green: **detected proxy client and traffic-takeover mode**
 (TUN / system proxy / none — each with its leak surface), public IP + geolocation,
 proxy/hosting flags, IPv6 leak surface, **timezone consistency** (system vs exit IP),
-locale consistency, and whether DNS resolution leaks to your local ISP. Re-run after
-switching nodes or countries.
+locale consistency, whether DNS resolution leaks to your local ISP, and a
+**WebRTC active-detection entry point**. Re-run after switching nodes or countries.
 
 <details>
 <summary>Sample output (illustrative, not real data)</summary>
@@ -91,6 +91,7 @@ switching nodes or countries.
 3) Timezone check      [FAIL] system UTC+8 vs exit UTC+9, off by +1h  ← #1 giveaway
 4) Language / locale   [WARN] browser default language doesn't match exit country
 5) DNS resolution path [ OK ] fake-ip tunnel resolution
+6) WebRTC leak surface [ OK ] test page ready — run: browse-vpn --webrtc
 ```
 </details>
 
@@ -111,7 +112,9 @@ powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Proxy http://127.0.0.
 ./browse-vpn.sh --dry-run                        # preview only
 ./browse-vpn.sh US                               # force a country preset
 ./browse-vpn.sh --proxy=socks5://127.0.0.1:1080  # local-port-only setups: probe and Chrome both use it
+./browse-vpn.sh --webrtc                         # also open the WebRTC leak test page
 ```
+(`browse-vpn.ps1 -WebRTC` on Windows does the same.)
 
 > Before launching, the script checks the takeover mode: with no TUN, no system proxy and
 > no `--proxy`, it **warns in red** — in that state Chrome would connect directly and expose
@@ -136,7 +139,27 @@ Platform difference (where the Unix version is nicer):
 > Key design: the timezone always follows the **real exit IP** (not the country argument),
 > so you never end up with a new contradiction like "IP in Tokyo, timezone set to New York".
 
-### 3. Per-country shortcuts (Windows, double-click / no arguments to remember)
+### 3. `webrtc-leak-test.html` — active WebRTC leak detection
+
+To punch through NATs, WebRTC sends UDP to a STUN server and gets back "the public IP the world
+sees for you". **If that UDP doesn't go through the VPN tunnel, it reveals your real IP** — even
+though the page's HTTP requests show the exit IP. System-proxy mode can't stop it; only TUN mode
+can. Since this is a browser API that command-line audits can't reach, it ships as a dedicated
+active test page:
+
+- **Recommended**: `browse-vpn.ps1 -WebRTC` / `./browse-vpn.sh --webrtc` — opens the test page
+  inside the consistency session (the real tunnel), closest to real use.
+- Or just open `webrtc-leak-test.html` directly in any browser.
+
+The page runs a real STUN probe, compares the WebRTC reflexive candidate (srflx) against your exit
+IP, and gives a verdict: **consistent** (safe) / **leak** (a public IP different from the exit is
+exposed, highlighted in red) / **no srflx** (UDP is fully tunneled — no leak surface). Pure
+front-end, no external dependencies beyond public STUN servers, uploads nothing.
+
+> Fixing a leak: disable WebRTC via a browser extension, or have your client take over all UDP in
+> **TUN mode**.
+
+### 4. Per-country shortcuts (Windows, double-click / no arguments to remember)
 
 `browse-jp` Japan · `browse-us` US · `browse-sg` Singapore · `browse-hk` Hong Kong ·
 `browse-gb` UK · `browse-de` Germany · `browse-kr` Korea.
@@ -158,7 +181,8 @@ in `browse-vpn.sh`.
 | Timezone | `tzutil /s` temporarily switches the system timezone (Chrome ignores `TZ`), auto-restored via `finally` when the session ends | Chrome launched with `TZ=<IANA timezone>` — process-scoped, system timezone untouched |
 | Language | Chrome `--lang` / `--accept-lang` + `intl.selected_languages` in the isolated profile; system locale untouched | same |
 | DNS | "Secure DNS (DoH)" disabled in the isolated Chrome profile, forcing system DNS (TUN mode = fake-ip tunnel; in system-proxy mode hostnames are resolved remotely by the proxy), so the browser can't leak its own lookups | same |
-| IP / WebRTC | Taken over by TUN / system proxy / `--proxy`; the toolkit audits the takeover mode and flags WebRTC / IPv6 leak surfaces | same |
+| IP | Taken over by TUN / system proxy / `--proxy`; the toolkit audits the takeover mode and flags the IPv6 leak surface | same |
+| WebRTC | `webrtc-leak-test.html` active detection: real STUN probe, compares srflx vs exit IP for a leak verdict; `browse-vpn --webrtc` runs it inside the real tunnel | same (pure front-end, identical cross-platform) |
 
 > Isolated Chrome profiles live in `chrome-<country>-profile/` (git-ignored, never committed).
 > Both platforms share the same directory naming.

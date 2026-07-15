@@ -90,3 +90,30 @@ jobs:
           else
             echo "❌ FAIL：Chrome 未按 TZ 报告时区"; exit 1
           fi
+
+      - name: WebRTC 检测页冒烟（真 Chrome 跑完检测逻辑）
+        shell: bash
+        run: |
+          set -e
+          CHROME=""
+          for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+                   google-chrome google-chrome-stable chromium chromium-browser; do
+            if [ -x "$c" ]; then CHROME=$c; break; fi
+            if command -v "$c" >/dev/null 2>&1; then CHROME=$(command -v "$c"); break; fi
+          done
+          [ -n "$CHROME" ] || { echo "no chrome"; exit 1; }
+          # 无头下 STUN 的真实 UDP 往返无法被 --dump-dom 等待到，故只冒烟：
+          # 断言检测逻辑跑到"终态判定"（非 PENDING / 非 UNSUPPORTED / 无 JS 报错），
+          # 证明 RTCPeerConnection 构造、候选解析、判定渲染在真机上均正常。
+          dom=$(TZ=UTC "$CHROME" --headless=new --disable-gpu --no-sandbox \
+                --virtual-time-budget=8000 --user-data-dir=/tmp/rtcsmoke \
+                --dump-dom "file://$PWD/webrtc-leak-test.html" 2>/dev/null)
+          v=$(printf '%s' "$dom" | grep -oE 'WEBRTC RESULT:[A-Z_]+' | head -1 | sed 's/.*://')
+          echo "检测页终态判定: ${v:-<无>}"
+          case "$v" in
+            OK|LEAK|NO_SRFLX|SRFLX_NO_EXITREF)
+              echo "✅ PASS：$(uname) 上 WebRTC 检测页跑到终态（判定=$v），逻辑无报错" ;;
+            *)
+              echo "❌ FAIL：检测页未跑到终态（判定=${v:-空}），可能 JS 报错或 RTCPeerConnection 不可用"
+              printf '%s\n' "$dom" | grep -iE 'result|verdict' | head; exit 1 ;;
+          esac

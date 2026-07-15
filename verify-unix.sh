@@ -73,6 +73,20 @@ echo; echo "==== 7) browse-vpn.sh --dry-run（端到端，不开浏览器）====
 bash ./browse-vpn.sh --dry-run >/tmp/bv.log 2>&1
 if grep -q '将使用' /tmp/bv.log; then ok "DryRun 走通并输出决策"; sed 's/^/    /' /tmp/bv.log | grep -E '将使用|时区|⚠'; else no "DryRun 未产出决策，见 /tmp/bv.log"; cat /tmp/bv.log; fi
 
+echo; echo "==== 8) WebRTC 检测页冒烟（真 Chrome 跑完检测逻辑）===="
+if [ -n "$CHROME" ] && [ -f ./webrtc-leak-test.html ]; then
+  dom=$("$CHROME" --headless=new --disable-gpu --no-sandbox --virtual-time-budget=8000 \
+        --user-data-dir=/tmp/rtcsmoke --dump-dom "file://$PWD/webrtc-leak-test.html" 2>/dev/null)
+  v=$(printf '%s' "$dom" | grep -oE 'WEBRTC RESULT:[A-Z_]+' | head -1 | sed 's/.*://')
+  case "$v" in
+    OK|LEAK|NO_SRFLX|SRFLX_NO_EXITREF) ok "检测页跑到终态（判定=$v），逻辑无报错" ;;
+    *) no "检测页未跑到终态（判定=${v:-空}）——可能 JS 报错或 RTCPeerConnection 不可用" ;;
+  esac
+  note "无头下拿不到 STUN 反射候选属正常；真实泄露请用 ./browse-vpn.sh --webrtc 在真浏览器里判定"
+else
+  note "无 Chrome 或缺检测页，跳过 WebRTC 冒烟"
+fi
+
 echo; echo "============================================"
 echo "  结果：PASS=$pass  FAIL=$fail"
 [ "$fail" -eq 0 ] && echo "  ✅ 平台相关部分全部通过" || echo "  ⚠ 有失败项，请把上面 [FAIL] 行反馈给作者"

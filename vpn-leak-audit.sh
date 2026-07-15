@@ -33,6 +33,19 @@ zone_to_seconds() {
 }
 fmt_utc() { printf 'UTC%+d:00' "$(( $1 / 3600 ))"; }
 
+AUDIT_DIR=$(cd "$(dirname "$0")" && pwd)
+find_chrome() {
+    local c
+    case "$(uname)" in
+        Darwin) for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+                         "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+                         "/Applications/Chromium.app/Contents/MacOS/Chromium"; do
+                    [ -x "$c" ] && { echo "$c"; return; }; done ;;
+        Linux)  for c in google-chrome google-chrome-stable chromium chromium-browser; do
+                    command -v "$c" >/dev/null 2>&1 && { command -v "$c"; return; }; done ;;
+    esac
+}
+
 echo ""
 head_ " VPN 出口一致性 / 泄露自查 "
 echo " 时间: $(date '+%Y-%m-%d %H:%M:%S %z')"
@@ -191,6 +204,20 @@ if [ "$TAKEOVER" = "sysproxy" ]; then
     info "当前为系统代理模式：浏览器把域名交给代理远端解析，本地 DNS 主要影响直连/不走代理的应用。"
 fi
 info "提示：确认 Chrome 已关闭「安全 DNS(DoH)」，否则浏览器会绕过 VPN 自行解析。"
+line
+
+# ---------- 6. WebRTC 泄露（主动检测，需真实浏览器）----------
+head_ "6) WebRTC 泄露面（主动检测）"
+info "WebRTC 是浏览器 API，需在真实浏览器里发 STUN 才能实测，命令行只读检查覆盖不到。"
+if [ -f "$AUDIT_DIR/webrtc-leak-test.html" ]; then
+    CHROME=$(find_chrome)
+    [ -n "$CHROME" ] && ok "检测页已就绪：webrtc-leak-test.html（已找到浏览器）" \
+                     || warn "检测页已就绪：webrtc-leak-test.html（未找到 Chrome/Chromium，请用任意浏览器打开）"
+    info "实测（推荐，在真实隧道内跑）：./browse-vpn.sh --webrtc"
+    info "或直接双击 webrtc-leak-test.html —— 会自动对比 WebRTC 公网 IP 与出口 IP 并给出判定。"
+else
+    warn "未找到 webrtc-leak-test.html —— 请从仓库获取该检测页。"
+fi
 dline
 head_ " 自查完成。红色=需处理，黄色=注意，绿色=通过。"
 echo ""
