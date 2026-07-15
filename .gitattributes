@@ -1,0 +1,9 @@
+# shell 脚本必须保持 LF（CRLF 会导致 bash 报 “\r: command not found”）
+*.sh text eol=lf
+
+# PowerShell 脚本按 Windows 习惯用 CRLF
+*.ps1 text eol=crlf
+
+# 二进制资源
+*.jpg binary
+*.png binary
