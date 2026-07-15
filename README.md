@@ -9,6 +9,10 @@
 > A cross-platform toolkit (PowerShell for Windows, Bash for macOS/Linux) to **audit VPN leaks**
 > (IP / DNS / WebRTC / IPv6) and keep browser fingerprint (timezone / locale) **consistent with the
 > exit-node country**, so geo-fingerprinting doesn't flag "this user is on a VPN".
+> Works with all mainstream proxy clients — **Clash / Mihomo, V2Ray / Xray (v2rayN), sing-box,
+> Shadowsocks, Hysteria, WireGuard, OpenVPN** — by detecting *how* traffic is taken over
+> (TUN interface / system proxy / local port only) instead of hard-coding any specific client.
+> See the [English quick start](#english-quick-start) below.
 
 **为什么需要它 / Why**：VPN 换了你的 IP，但浏览器仍按**本机系统时区和语言**上报。当 IP 显示在东京、
 浏览器却报 UTC+8 + zh-CN 时，稍讲究的风控系统一眼就能看出你在用代理——IP 对了，指纹却出卖了你。
@@ -145,6 +149,77 @@ macOS / Linux 直接传国家码即可（`./browse-vpn.sh jp`），无需单独�
 - macOS / Linux 版依赖本机 tzdata 时区数据库解析 IANA 时区名（主流系统均自带；极简容器环境需先装 `tzdata`，脚本检测不到时会提示）。
 - 泄露自查按"接管方式"判定（TUN / 系统代理 / 仅本地端口），主流客户端（Clash/Mihomo、V2Ray/Xray、sing-box、SS、WireGuard、OpenVPN）均适用；`198.18.x` fake-ip 特征判定覆盖 Clash/Mihomo/sing-box/Xray fakedns。
 - 系统代理模式下浏览器是安全的，但 UDP/WebRTC 与不认代理的应用可能绕行——想全局兜住请开客户端的 TUN 模式。
+
+## English Quick Start
+
+<details>
+<summary>Expand for the English guide</summary>
+
+**Why**: A VPN changes your IP, but your browser still reports the **local system timezone and
+language**. When your IP says Tokyo but JavaScript reports UTC+8 with `zh-CN`, any serious
+geo-fingerprinting system knows you're on a proxy. This toolkit aligns IP / DNS / WebRTC /
+timezone / locale to the same country.
+
+**Requirements**: Windows PowerShell 5.1 (built into Win10/11) or bash 3.2+ with curl
+(built into macOS / mainstream Linux); Google Chrome or Chromium; any mainstream proxy client.
+Internet access to `ip-api.com` (free, no key) for exit-node probing.
+
+**1. Leak audit** — read-only, changes nothing:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1   # Windows
+```
+```bash
+./vpn-leak-audit.sh                                             # macOS / Linux
+```
+
+Reports with OK / WARN / FAIL: detected proxy client and **traffic-takeover mode**
+(TUN / system proxy / none — with the corresponding leak surface), public IP + geolocation,
+proxy/hosting flags, IPv6 leak surface, **timezone consistency** (system vs exit IP),
+locale consistency, and DNS resolution path (fake-ip `198.18.x` is recognized as
+Clash/Mihomo/sing-box/Xray fakedns tunnel resolution).
+
+**2. Consistent browsing session** — the main tool:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1                # auto-detect exit country
+powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -DryRun       # preview only
+powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Country US   # force a country preset
+powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Proxy http://127.0.0.1:10809
+    # client only exposes a local port (no system proxy / TUN)? route Chrome through it
+```
+```bash
+./browse-vpn.sh                                  # auto-detect exit country
+./browse-vpn.sh --dry-run                        # preview only
+./browse-vpn.sh US                               # force a country preset
+./browse-vpn.sh --proxy=socks5://127.0.0.1:1080  # local-port-only setups (v2ray/Xray)
+```
+
+It probes the current exit country, then launches an isolated Chrome profile with matching
+language and browser DoH disabled (so DNS goes through the tunnel). Timezone handling differs
+by platform:
+
+- **Windows**: Chrome ignores the `TZ` environment variable, so the script temporarily switches
+  the system timezone via `tzutil` and restores it automatically when you close that Chrome window.
+- **macOS / Linux**: Chrome honors `TZ`, so the script just launches Chrome with
+  `TZ=<exit IANA timezone>` — **only that browser process is affected; the system timezone is
+  never touched**.
+
+Key design: the timezone always follows the **real exit IP** (not the country argument), so you
+never end up with "IP in Tokyo, timezone set to New York". Presets cover
+JP / KR / SG / HK / TW / GB / DE / FR / NL / US / CA / AU; multi-timezone countries (US/CA/AU)
+resolve to the exact region detected. If neither TUN, system proxy, nor `--proxy` is present,
+the script warns in red that Chrome would connect directly and expose your real IP.
+(Note: on Windows PS5.1 the exit probe only supports `http://` proxies — v2rayN users should use
+the HTTP port 10809; curl on macOS/Linux supports `socks5://` natively.)
+
+**Caveats**: This only fixes *technical* signals — account behavior (login history, payment
+region, addresses) is on you. System-proxy mode keeps the browser safe, but UDP/WebRTC and
+proxy-unaware apps may bypass it — enable your client's TUN mode for full coverage. The
+Unix scripts need the tzdata database (present on mainstream systems; minimal containers may
+need to install it — the script warns if it's missing).
+
+</details>
 
 ## 许可 / License
 
