@@ -162,8 +162,9 @@ case "$(uname)" in
     Darwin)
         dns_servers=$(scutil --dns 2>/dev/null | awk '/nameserver\[[0-9]+\]/{print $3}' | sort -u) ;;
     Linux)
+        # 只抽取 IPv4 地址样式的 token —— 避免把 "Link 2"/"Link 3" 的链路编号当成 DNS
         if command -v resolvectl >/dev/null 2>&1; then
-            dns_servers=$(resolvectl dns 2>/dev/null | awk '{for(i=2;i<=NF;i++)print $i}' | grep -E '^[0-9]' | sort -u)
+            dns_servers=$(resolvectl dns 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u)
         fi
         if [ -z "$dns_servers" ] && [ -r /etc/resolv.conf ]; then
             dns_servers=$(awk '/^nameserver/{print $2}' /etc/resolv.conf | sort -u)
