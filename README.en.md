@@ -64,19 +64,22 @@ directly, no path edits needed.
 ```powershell
 # Windows
 powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1
-powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoDnsLeak  # skip the networked DNS test
+powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoDnsLeak    # skip the networked DNS test
+powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoSpeedTest  # skip the link-quality test
 ```
 ```bash
 # macOS / Linux
 ./vpn-leak-audit.sh
-./vpn-leak-audit.sh --no-dns-leak   # skip the networked DNS test
+./vpn-leak-audit.sh --no-dns-leak     # skip the networked DNS test
+./vpn-leak-audit.sh --no-speed-test   # skip the link-quality test
 ```
 
 Reports with red / yellow / green: **detected proxy client and traffic-takeover mode**
 (TUN / system proxy / none — each with its leak surface), public IP + geolocation,
 proxy/hosting flags, IPv6 leak surface, **timezone consistency** (system vs exit IP),
-locale consistency, DNS resolution path (static config + **active DNS-leak test**), and a
-**WebRTC active-detection entry point**. Re-run after switching nodes or countries.
+locale consistency, DNS resolution path (static config + **active DNS-leak test**), a
+**WebRTC active-detection entry point**, and **link quality** (handshake + throughput —
+is this node fast enough to watch video). Re-run after switching nodes or countries.
 
 > **Active DNS-leak test** (on by default): triggers real resolution of random subdomains and
 > checks *which resolvers actually answered* (with country / ASN), comparing them to the exit
@@ -84,6 +87,15 @@ locale consistency, DNS resolution path (static config + **active DNS-leak test*
 > resolution actually leaks to your local ISP). Uses the free [bash.ws](https://bash.ws) API
 > (same one dnsleaktest.com's official CLI uses); it only sends random subdomains, no personal
 > data. Skip it with `--no-dns-leak` / `-NoDnsLeak`.
+
+> **Link-quality test** (on by default): the first six checks answer *"am I safe?"*; this one
+> answers *"is this node actually usable?"* It measures the TLS handshake time and real
+> throughput **through the proxy**, then maps it to a 480p / 720p / 1080p verdict.
+> **Don't use `ping` to judge speed** — under fake-ip every hostname resolves to `198.18.x.x`
+> and ICMP is answered locally, so ping stays instant no matter how dead the node is. Your
+> client's latency panel is no better: it measures one handshake round-trip and says nothing
+> about bandwidth — a low-latency node can easily be a low-bandwidth one. Costs ~20MB; skip
+> with `--no-speed-test` / `-NoSpeedTest`.
 
 <details>
 <summary>Sample output (illustrative, not real data)</summary>
@@ -102,6 +114,8 @@ locale consistency, DNS resolution path (static config + **active DNS-leak test*
 5) DNS resolution path [ OK ] fake-ip tunnel resolution (static config)
    Active DNS-leak test [FAIL] resolvers in China but exit is Japan — DNS leaking to local ISP
 6) WebRTC leak surface [ OK ] test page ready — run: browse-vpn --webrtc
+7) Link quality        [ OK ] TLS handshake 0.27s — node responds fast
+                       [ OK ] 167.8 Mbps down — smooth 1080p
 ```
 </details>
 
@@ -195,6 +209,7 @@ in `browse-vpn.sh`.
 | IP | Taken over by TUN / system proxy / `--proxy`; the toolkit audits the takeover mode | same |
 | IPv6 | Fetches the public IPv6 and **compares its geolocation to the exit country**: match = also tunneled (no leak); mismatch = bypassing the VPN and exposing your real ISP (real leak). Avoids the "any IPv6 = alarm" false positive | same |
 | WebRTC | `webrtc-leak-test.html` active detection: real STUN probe, compares srflx vs exit IP for a leak verdict; `browse-vpn --webrtc` runs it inside the real tunnel | same (pure front-end, identical cross-platform) |
+| Link quality | Pulls 20MB from the Cloudflare speed endpoint through the active takeover path (TUN directly / system proxy via `-x`), reads `time_appconnect` and `speed_download`, maps to 480p/720p/1080p tiers | same (on macOS the proxy address comes from `scutil --proxy`; PAC mode is skipped to avoid a misleading number) |
 
 > Isolated Chrome profiles live in `chrome-<country>-profile/` (git-ignored, never committed).
 > Both platforms share the same directory naming.
@@ -220,6 +235,18 @@ in `browse-vpn.sh`.
   personal data, and the service only sees your resolver IPs (which is the point). Pass
   `--no-dns-leak` to skip. Under fake-ip, if resolvers still show up as local, it's usually the
   client's DNS using a domestic upstream — follow the hint to route DNS through the tunnel.
+- **Link quality is a quick check, not a speed-test suite**: a single 20MB / 8-second sample.
+  It reliably separates "can I watch 720p / 1080p" tiers, but it has poor resolution on fast
+  links (>100 Mbps) and will vary between runs on the same node. To **rank** several nodes,
+  use a dedicated speed-test tool — don't compare these numbers finely. It depends on the
+  Cloudflare endpoint (`speed.cloudflare.com`) and skips gracefully when unreachable — which
+  is itself a signal that the node is unstable.
+- **Reachable ≠ usable**: under fake-ip every hostname resolves to `198.18.x.x` and ICMP is
+  answered by your own machine, so `ping` succeeds instantly with ~0ms regardless of node
+  health — `ping` / `tracert` / `nslookup` carry no diagnostic value here. Likewise your
+  client's "latency test" only measures one handshake round-trip and **says nothing about
+  bandwidth**: in real testing a node ranking mid-pack on latency came dead last on
+  throughput (2.72 Mbps — not even enough for 480p). Judge speed by check 7 instead.
 
 ## License
 

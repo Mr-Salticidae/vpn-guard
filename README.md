@@ -55,16 +55,25 @@ chmod +x *.sh        # 仅 macOS / Linux 需要（git 通常已保留可执行�
 ```powershell
 # Windows
 powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1
-powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoDnsLeak  # 跳过 DNS 联网实测
+powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoDnsLeak    # 跳过 DNS 联网实测
+powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoSpeedTest  # 跳过链路质量实测
 ```
 ```bash
 # macOS / Linux
 ./vpn-leak-audit.sh
-./vpn-leak-audit.sh --no-dns-leak   # 跳过 DNS 联网实测
+./vpn-leak-audit.sh --no-dns-leak     # 跳过 DNS 联网实测
+./vpn-leak-audit.sh --no-speed-test   # 跳过链路质量实测
 ```
 检查并以红/黄/绿输出：**代理客户端与流量接管方式**（TUN / 系统代理 / 都没有）、
 公网 IP + 地理位置、代理/机房标记、IPv6 泄露面、**时区一致性**（系统 vs 出口 IP）、
-语言一致性、DNS 解析路径（静态配置 + **DNS 泄露主动实测**）、**WebRTC 主动检测入口**。换节点或换国家后重跑一次即可。
+语言一致性、DNS 解析路径（静态配置 + **DNS 泄露主动实测**）、**WebRTC 主动检测入口**、
+**链路质量**（握手 + 吞吐，够不够看视频）。换节点或换国家后重跑一次即可。
+
+> **链路质量实测**（默认开启）：前 6 项回答"我安不安全"，第 7 项回答"我这条链路够不够用"。
+> 实测走代理的 TLS 握手耗时与实际吞吐，直接给出"够不够看 720p / 1080p"的判定。
+> **别用 ping 判断快慢**——fake-ip 下所有域名都解析到 `198.18.x.x`、ICMP 由本机应答，
+> 节点挂了 ping 也照样秒通；客户端面板的延迟数字同样不反映带宽（只测一次握手往返），
+> 低延迟节点完全可能是低带宽节点。约 20MB 流量，加 `--no-speed-test` / `-NoSpeedTest` 可跳过。
 
 > **DNS 泄露主动实测**（默认开启）：对随机子域发起真实解析，回查是哪些解析器实际应答（含归属国 / ASN），
 > 再与出口国对比——能抓到"配置看着走隧道、实际却漏给本地 ISP"这类被动检查看不出的泄露。
@@ -88,6 +97,8 @@ powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoDnsLeak  # 跳�
 5) DNS 解析路径       [ OK ] fake-ip 隧道解析（静态配置）
    DNS 泄露主动实测   [FAIL] 解析器在 China，出口却在 Japan —— DNS 正泄露给本地 ISP
 6) WebRTC 泄露面      [ OK ] 检测页已就绪，实测：browse-vpn --webrtc
+7) 链路质量           [ OK ] TLS 握手 0.27s —— 节点响应快
+                      [ OK ] 下行 167.8 Mbps —— 1080p 流畅
 ```
 </details>
 
@@ -166,6 +177,7 @@ macOS / Linux 直接传国家码即可（`./browse-vpn.sh jp`），无需单独�
 | IP | 由 TUN / 系统代理 / `--proxy` 接管，脚本审查接管方式 | 同左 |
 | IPv6 | 取公网 IPv6 后查其归属并**与出口国比对**：一致=也走隧道（未泄露）；不一致=绕过 VPN 暴露真实 ISP（真泄露）。避免"有 IPv6 就报警"的误报 | 同左 |
 | WebRTC | `webrtc-leak-test.html` 主动检测：真实 STUN 探测，对比 srflx 与出口 IP 判定是否泄露；`browse-vpn --webrtc` 在真实隧道内跑 | 同左（纯前端，跨平台一致） |
+| 链路质量 | 走当前接管路径（TUN 直连隧道 / 系统代理加 `-x`）向 Cloudflare 测速点取 20MB，读 `time_appconnect` 与 `speed_download`，按 480p/720p/1080p 档位判定 | 同左（macOS 系统代理从 `scutil --proxy` 取地址；PAC 模式跳过以免失真） |
 
 > 独立 Chrome 配置存放于 `chrome-<国家>-profile/`（已在 `.gitignore` 忽略，不会进仓库），
 > 两个平台的脚本共用同一套目录命名。
@@ -178,6 +190,8 @@ macOS / Linux 直接传国家码即可（`./browse-vpn.sh jp`），无需单独�
 - 泄露自查按"接管方式"判定（TUN / 系统代理 / 仅本地端口），主流客户端（Clash/Mihomo、V2Ray/Xray、sing-box、SS、WireGuard、OpenVPN）均适用；`198.18.x` fake-ip 特征判定覆盖 Clash/Mihomo/sing-box/Xray fakedns。
 - 系统代理模式下浏览器是安全的，但 UDP/WebRTC 与不认代理的应用可能绕行——想全局兜住请开客户端的 TUN 模式。
 - DNS 泄露主动实测依赖第三方服务 [bash.ws](https://bash.ws)（与 ip-api / ipify 同为默认联网项）：只发随机子域探测、不上传个人数据，服务只看到你的解析器 IP（这正是检测目标）。介意联网可加 `--no-dns-leak`。fake-ip 环境下若仍报解析器在本地，多因客户端 DNS 用了域内上游——按提示让 DNS 走隧道远端解析即可。
+- **链路质量只是一次快检，不是测速软件**：单次 20MB / 8 秒采样，够区分「能不能看 720p / 1080p」这几档，但对高速链路（>100 Mbps）区分度不足，同一节点多次测量会有波动。要在多个节点间**排序**请用专门的测速工具，别拿这个数字做精细比较。它依赖 Cloudflare 测速点（`speed.cloudflare.com`），不可达时会优雅跳过并提示——那本身也是节点不稳的信号。
+- **ping 通 ≠ 链路可用**：fake-ip 模式下所有域名都解析到 `198.18.x.x`、ICMP 由本机应答，无论节点好坏 ping 都秒通、延迟接近 0，`ping` / `tracert` / `nslookup` 在这里全部失去诊断意义。同理，客户端面板的「延迟测试」只测一次握手往返，**不反映带宽**——实测中出现过延迟排名中上游的节点带宽垫底（2.72 Mbps，连 480p 都紧张）。判断快慢请看第 7 项的握手耗时与吞吐。
 
 ## 许可 / License
 

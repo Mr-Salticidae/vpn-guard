@@ -35,11 +35,17 @@ fmt_utc() { printf 'UTC%+d:00' "$(( $1 / 3600 ))"; }
 
 # ---- 参数 ----
 DNS_LEAK=1
+SPEED_TEST=1
 for a in "$@"; do
     case "$a" in
         --no-dns-leak) DNS_LEAK=0 ;;
-        -h|--help) echo "用法: ./vpn-leak-audit.sh [--no-dns-leak]"; echo "  --no-dns-leak  跳过联网的 DNS 泄露主动实测（默认开启，走 bash.ws）"; exit 0 ;;
-        *) echo "未知参数: $a（可用 --no-dns-leak）" >&2; exit 1 ;;
+        --no-speed-test) SPEED_TEST=0 ;;
+        -h|--help)
+            echo "用法: ./vpn-leak-audit.sh [--no-dns-leak] [--no-speed-test]"
+            echo "  --no-dns-leak    跳过联网的 DNS 泄露主动实测（默认开启，走 bash.ws）"
+            echo "  --no-speed-test  跳过链路质量实测（默认开启，约 20MB 流量）"
+            exit 0 ;;
+        *) echo "未知参数: $a（可用 --no-dns-leak / --no-speed-test）" >&2; exit 1 ;;
     esac
 done
 
@@ -295,6 +301,78 @@ if [ -f "$AUDIT_DIR/webrtc-leak-test.html" ]; then
     info "或直接双击 webrtc-leak-test.html —— 会自动对比 WebRTC 公网 IP 与出口 IP 并给出判定。"
 else
     warn "未找到 webrtc-leak-test.html —— 请从仓库获取该检测页。"
+fi
+line
+
+# ---------- 7. 链路质量（够不够用；与泄露无关）----------
+head_ "7) 链路质量（够不够用 · 与泄露无关）"
+info "ping 在这里没有意义：fake-ip 下所有域名都解析到 198.18.x.x、ICMP 由本机应答，"
+info "节点挂了 ping 也照样秒通。只能实测走代理的 TLS 握手与实际吞吐。"
+if [ "$SPEED_TEST" != "1" ]; then
+    info "已跳过链路质量实测（--no-speed-test）。"
+else
+    speed_px=""; speed_skip=""
+    case "$TAKEOVER" in
+        tun) info "经 TUN 隧道实测" ;;
+        sysproxy)
+            # Linux：curl 自己认 http_proxy/https_proxy；macOS 的系统代理 curl 不会自动用，需从 scutil 取
+            if [ -n "${https_proxy:-}${HTTPS_PROXY:-}${http_proxy:-}${HTTP_PROXY:-}" ]; then
+                info "经环境变量代理实测"
+            elif [ "$(uname)" = "Darwin" ]; then
+                ph=$(scutil --proxy 2>/dev/null | awk '/HTTPSProxy/{print $3}')
+                pp=$(scutil --proxy 2>/dev/null | awk '/HTTPSPort/{print $3}')
+                if [ -n "$ph" ] && [ -n "$pp" ]; then
+                    speed_px="http://$ph:$pp"
+                    info "经系统代理 $speed_px 实测"
+                else
+                    speed_skip="读不到系统代理地址 —— 跳过（直测会失真）"
+                fi
+            fi ;;
+        *) info "未检测到接管 —— 下面测的是当前默认出口（可能是直连）" ;;
+    esac
+    if [ -n "$speed_skip" ]; then
+        warn "$speed_skip"
+    else
+        info "实测中（Cloudflare 测速点，约 20MB / 最多 8 秒；--no-speed-test 可跳过）……"
+        if [ -n "$speed_px" ]; then
+            raw=$(curl -x "$speed_px" -s -o /dev/null -w "%{time_appconnect} %{speed_download} %{http_code}" \
+                  --connect-timeout 10 -m 8 "https://speed.cloudflare.com/__down?bytes=20971520" 2>/dev/null)
+        else
+            raw=$(curl -s -o /dev/null -w "%{time_appconnect} %{speed_download} %{http_code}" \
+                  --connect-timeout 10 -m 8 "https://speed.cloudflare.com/__down?bytes=20971520" 2>/dev/null)
+        fi
+        tls=""; spd=""; code=""
+        read -r tls spd code <<EOF
+$raw
+EOF
+        case "$code" in
+            2[0-9][0-9]) ;;
+            *)
+                warn "测速点不可达或被拒（HTTP ${code:-无响应}）—— 跳过链路质量判定"
+                info "这本身也是个信号：若其它检查都正常却连不上测速点，多半是当前节点不稳。"
+                code="" ;;
+        esac
+        if [ -n "$code" ]; then
+            mbps=$(awk -v s="$spd" 'BEGIN{printf "%.1f", s*8/1000000}')
+            tls_s=$(awk -v t="$tls" 'BEGIN{printf "%.2f", t}')
+            # TLS 握手：最能反映节点是否在排队。网页点击的"卡顿感"主要来自这里。
+            if   awk -v t="$tls" 'BEGIN{exit !(t<=0.5)}'; then ok   "TLS 握手 ${tls_s}s —— 节点响应快"
+            elif awk -v t="$tls" 'BEGIN{exit !(t<=2.0)}'; then warn "TLS 握手 ${tls_s}s —— 偏慢，网页点击会有可感延迟"
+            else                                               bad  "TLS 握手 ${tls_s}s —— 节点在排队/拥塞，每次新连接都要干等这么久"
+            fi
+            # 吞吐：直接对齐"能不能看视频"
+            if   awk -v m="$mbps" 'BEGIN{exit !(m<1.5)}'; then bad  "下行 ${mbps} Mbps —— 不够 360p，基本没法看视频"
+            elif awk -v m="$mbps" 'BEGIN{exit !(m<3)}';   then bad  "下行 ${mbps} Mbps —— 只够 360~480p，720p 必卡"
+            elif awk -v m="$mbps" 'BEGIN{exit !(m<6)}';   then warn "下行 ${mbps} Mbps —— 720p 可用，1080p 会缓冲"
+            else                                               ok   "下行 ${mbps} Mbps —— 1080p 流畅"
+            fi
+            info "参考：480p≈1.5 / 720p≈3 / 1080p≈6 Mbps"
+            if awk -v t="$tls" -v m="$mbps" 'BEGIN{exit !(t>2.0 || m<3)}'; then
+                info "建议：换节点，别照客户端面板的延迟数字挑 —— 那只测一次握手往返，不反映带宽，"
+                info "      低延迟节点完全可能是低带宽节点。换完重跑本项对比。"
+            fi
+        fi
+    fi
 fi
 dline
 head_ " 自查完成。红色=需处理，黄色=注意，绿色=通过。"

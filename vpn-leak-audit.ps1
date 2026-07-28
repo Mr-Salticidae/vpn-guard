@@ -3,11 +3,12 @@
   用途：使用 VPN 访问受地区限制的海外平台前，一键检查真实身份是否泄露、
         以及浏览器指纹（时区/语言）是否与出口 IP 所在国一致。
   用法：右键“用 PowerShell 运行”，或在终端执行  powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1
-        加 -NoDnsLeak 可跳过联网的 DNS 泄露主动实测（默认开启，走 bash.ws）。
+        加 -NoDnsLeak   可跳过联网的 DNS 泄露主动实测（默认开启，走 bash.ws）。
+        加 -NoSpeedTest 可跳过链路质量实测（默认开启，约 20MB 流量）。
   只读检查，不修改任何系统设置。
 #>
 
-param([switch]$NoDnsLeak)
+param([switch]$NoDnsLeak, [switch]$NoSpeedTest)
 
 $ErrorActionPreference = 'SilentlyContinue'
 function Line($c='-'){ Write-Host ($c * 60) -ForegroundColor DarkGray }
@@ -215,6 +216,65 @@ if (Test-Path $rtcPage) {
     Info "或直接双击 webrtc-leak-test.html —— 会自动对比 WebRTC 公网 IP 与出口 IP 并给出判定。"
 } else {
     Warn "未找到 webrtc-leak-test.html —— 请从仓库获取该检测页。"
+}
+Line
+
+# ---------- 7. 链路质量（够不够用；与泄露无关）----------
+Write-Host "7) 链路质量（够不够用 · 与泄露无关）" -ForegroundColor Cyan
+Info "ping 在这里没有意义：fake-ip 下所有域名都解析到 198.18.x.x、ICMP 由本机应答，"
+Info "节点挂了 ping 也照样秒通。只能实测走代理的 TLS 握手与实际吞吐。"
+if ($NoSpeedTest) {
+    Info "已跳过链路质量实测（-NoSpeedTest）。"
+} elseif (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
+    Warn "未找到 curl.exe（Windows 10 1803+ 自带）—— 跳过链路质量实测"
+} else {
+    $pxArgs = @(); $skipReason = $null
+    switch ($TakeoverMode) {
+        'tun' { Info "经 TUN 隧道实测" }
+        'sysproxy' {
+            if ($reg.ProxyServer) {
+                # ProxyServer 可能是 "host:port"，也可能是 "http=h:p;https=h:p"
+                $px = "$($reg.ProxyServer)".Trim()
+                if     ($px -match '(?:^|;)\s*https?=([^;]+)') { $px = $Matches[1] }
+                elseif ($px -match ';')                        { $px = ($px -split ';')[0] }
+                if ($px -notmatch '://') { $px = "http://$px" }
+                $pxArgs = @('-x', $px)
+                Info ("经系统代理 {0} 实测" -f $px)
+            } elseif ($reg.AutoConfigURL) {
+                $skipReason = "PAC 模式下无法确定该测速站走代理还是直连 —— 跳过（测了也失真）"
+            }
+        }
+        default { Info "未检测到接管 —— 下面测的是当前默认出口（可能是直连）" }
+    }
+    if ($skipReason) {
+        Warn $skipReason
+    } else {
+        Info "实测中（Cloudflare 测速点，约 20MB / 最多 8 秒；-NoSpeedTest 可跳过）……"
+        $raw = & curl.exe @pxArgs -s -o NUL -w "%{time_appconnect} %{speed_download} %{http_code}" `
+                 --connect-timeout 10 -m 8 "https://speed.cloudflare.com/__down?bytes=20971520" 2>$null
+        $f = "$raw".Trim() -split '\s+'
+        if ($f.Count -lt 3 -or $f[2] -notmatch '^2\d\d$') {
+            Warn ("测速点不可达或被拒（HTTP {0}）—— 跳过链路质量判定" -f $(if ($f.Count -ge 3) { $f[2] } else { '无响应' }))
+            Info "这本身也是个信号：若其它检查都正常却连不上测速点，多半是当前节点不稳。"
+        } else {
+            $tls = [double]$f[0]
+            $mbps = [math]::Round(([double]$f[1]) * 8 / 1e6, 1)
+            # TLS 握手：最能反映节点是否在排队。网页点击的"卡顿感"主要来自这里。
+            if     ($tls -le 0.5) { Ok   ("TLS 握手 {0:N2}s —— 节点响应快" -f $tls) }
+            elseif ($tls -le 2.0) { Warn ("TLS 握手 {0:N2}s —— 偏慢，网页点击会有可感延迟" -f $tls) }
+            else                  { Bad  ("TLS 握手 {0:N2}s —— 节点在排队/拥塞，每次新连接都要干等这么久" -f $tls) }
+            # 吞吐：直接对齐"能不能看视频"
+            if     ($mbps -lt 1.5) { Bad  ("下行 {0} Mbps —— 不够 360p，基本没法看视频" -f $mbps) }
+            elseif ($mbps -lt 3)   { Bad  ("下行 {0} Mbps —— 只够 360~480p，720p 必卡" -f $mbps) }
+            elseif ($mbps -lt 6)   { Warn ("下行 {0} Mbps —— 720p 可用，1080p 会缓冲" -f $mbps) }
+            else                   { Ok   ("下行 {0} Mbps —— 1080p 流畅" -f $mbps) }
+            Info "参考：480p≈1.5 / 720p≈3 / 1080p≈6 Mbps"
+            if ($tls -gt 2.0 -or $mbps -lt 3) {
+                Info "建议：换节点，别照客户端面板的延迟数字挑 —— 那只测一次握手往返，不反映带宽，"
+                Info "      低延迟节点完全可能是低带宽节点。换完重跑本项对比。"
+            }
+        }
+    }
 }
 Line '='
 Write-Host " 自查完成。红色=需处理，黄色=注意，绿色=通过。" -ForegroundColor Cyan
