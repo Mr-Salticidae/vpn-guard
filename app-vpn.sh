@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-#   app-vpn.sh  —  一致性桌面应用 / CLI 会话（macOS / Linux 版）   vpn-guard v1.0.0
+#   app-vpn.sh  —  一致性桌面应用 / CLI 会话（macOS / Linux 版）   vpn-guard v1.0.1
 #
 #   它是 browse-vpn.sh 的「非浏览器」对应物。browse-vpn 只作用于它启动的那个 Chrome；
 #   Claude Desktop / Codex / Claude Code / Cursor 这类桌面应用与 CLI 完全不在它的射程内。
