@@ -26,6 +26,21 @@ jobs:
           bash -n app-vpn.sh
           bash -n verify-unix.sh
 
+      - name: 禁止「$变量」紧邻多字节字符（macOS bash 3.2 会把首字节吞进变量名）
+        shell: bash
+        run: |
+          # 实测事故：app-vpn.sh 里的 "退出码 $rc）" 在 macOS bash 3.2 上被解析成变量 rc\xef，
+          # 因该脚本开了 set -u 直接报 "unbound variable" 退出；没开 set -u 的脚本则是
+          # 静默吞掉一个字符、输出少个括号。一律要求写成 ${var}。
+          # 用 perl 而非 grep -P：macOS 自带的 BSD grep 不支持 -P。
+          hits=$(perl -ne 'print "$ARGV:$.: $_" if /\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]/' ./*.sh || true)
+          if [ -n "$hits" ]; then
+            echo "以下位置的变量紧邻多字节字符，必须改用 \${var} 花括号写法："
+            echo "$hits"
+            exit 1
+          fi
+          echo "✅ PASS：无「变量名紧邻多字节字符」的写法"
+
       - name: ShellCheck 静态分析
         run: |
           if command -v shellcheck >/dev/null 2>&1; then
@@ -121,7 +136,7 @@ jobs:
           if [ "$want" = "$got" ]; then
             echo "✅ PASS：$(uname) 上 app-vpn.sh 的进程级 TZ 注入成立"
           else
-            echo "❌ FAIL：注入的 TZ 未到达子进程（want=$want got=$got）"; exit 1
+            echo "❌ FAIL：注入的 TZ 未到达子进程（want=$want got=${got}）"; exit 1
           fi
 
       - name: browse-vpn 决策（--dry-run，强制 US 保证确定性）
@@ -189,9 +204,9 @@ jobs:
           echo "检测页终态判定: ${v:-<无输出>}"
           case "$v" in
             OK|LEAK|NO_SRFLX|SRFLX_NO_EXITREF)
-              echo "✅ PASS：$(uname) 上 WebRTC 检测页跑到终态（判定=$v），逻辑无报错" ;;
+              echo "✅ PASS：$(uname) 上 WebRTC 检测页跑到终态（判定=${v}），逻辑无报错" ;;
             PENDING|UNSUPPORTED)
-              echo "❌ FAIL：检测页停在 $v，疑似 JS 报错或 RTCPeerConnection 不可用"
+              echo "❌ FAIL：检测页停在 ${v}，疑似 JS 报错或 RTCPeerConnection 不可用"
               grep -iE 'result|verdict' /tmp/rtc.out | head; exit 1 ;;
             "")
               echo "⏭ SKIP：无终态输出（该 runner 可能封了 STUN/出网）。真机请用 browse-vpn --webrtc 实测。" ;;

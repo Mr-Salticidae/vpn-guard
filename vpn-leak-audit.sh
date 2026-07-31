@@ -48,7 +48,7 @@ for a in "$@"; do
             echo "  --no-dns-leak    跳过联网的 DNS 泄露主动实测（默认开启，走 bash.ws）"
             echo "  --no-speed-test  跳过链路质量实测（默认开启，约 20MB 流量）"
             exit 0 ;;
-        *) echo "未知参数: $a（可用 --no-dns-leak / --no-speed-test）" >&2; exit 1 ;;
+        *) echo "未知参数: ${a}（可用 --no-dns-leak / --no-speed-test）" >&2; exit 1 ;;
     esac
 done
 
@@ -83,9 +83,9 @@ dns_leak_test() {
         dns_count=$((dns_count + 1))
         if [ -n "$up_exit" ] && [ -n "$rcc" ] && [ "$rcc" != "$up_exit" ]; then
             mismatch=$((mismatch + 1))
-            bad "解析器 $rip（$rname / $rasn）不在出口国 $exit_name —— DNS 正泄露到此解析器"
+            bad "解析器 ${rip}（$rname / ${rasn}）不在出口国 $exit_name —— DNS 正泄露到此解析器"
         else
-            info "解析器 $rip（$rname / $rasn）"
+            info "解析器 ${rip}（$rname / ${rasn}）"
         fi
     done <<EOF
 $rows
@@ -149,7 +149,7 @@ TAKEOVER="none"
 case "$route_if" in
     utun*|tun*|tap*|wg*|Meta*|meta*|mihomo*|sing*)
         TAKEOVER="tun"
-        ok "TUN 模式（对外路由走 $route_if）—— 全局流量（含 UDP/WebRTC）均被接管" ;;
+        ok "TUN 模式（对外路由走 ${route_if}）—— 全局流量（含 UDP/WebRTC）均被接管" ;;
     *)
         if [ -n "$sysproxy" ]; then
             TAKEOVER="sysproxy"
@@ -225,7 +225,7 @@ EOF
             ok "出口 $b_query 与浏览器一致 —— 不认代理的程序也被隧道接管，Claude/Codex 等不会泄露"
         fi
     else
-        bad "不认代理的程序直连出口 $b_query（$b_country / $b_isp），与浏览器出口 $ip_query（$ip_country）不一致 —— 真实 IP 正在泄露！"
+        bad "不认代理的程序直连出口 ${b_query}（$b_country / ${b_isp}），与浏览器出口 ${ip_query}（${ip_country}）不一致 —— 真实 IP 正在泄露！"
         info "受影响：Codex CLI、Claude Code CLI、Claude/ChatGPT 桌面版的 Node 主进程、各类自动更新与遥测。"
         info "修复 A（推荐，一劳永逸）：开客户端的 TUN 模式，全局接管所有程序。"
         info "修复 B（按应用）：用 ./app-vpn.sh 启动它们（进程级注入 HTTPS_PROXY + TZ，不改任何系统设置）。"
@@ -249,17 +249,17 @@ if [ -n "$v6" ] && [[ "$v6" == *:* ]]; then
     # "AS14061 DigitalOcean, LLC" → "AS14061"
     exit_asn=${ip_as%% *}; v6_asn=${v6as%% *}
     if [ -n "$up_exit" ] && [ -n "$up_v6cc" ] && [ "$up_v6cc" = "$up_exit" ]; then
-        ok "公网 IPv6: $v6（$v6country / $v6as）—— 与出口国一致，IPv6 也走隧道，未泄露"
+        ok "公网 IPv6: ${v6}（$v6country / ${v6as}）—— 与出口国一致，IPv6 也走隧道，未泄露"
     elif [ -n "$exit_asn" ] && [ -n "$v6_asn" ] && [ "$v6_asn" = "$exit_asn" ]; then
         # 国家对不上但 ASN 相同：这是出口节点自己的 IPv6，只是 ip-api 对同一台机器的 v4/v6
         # 地理定位不一致（DigitalOcean / Vultr 等云厂商常见）。只比国家会在这里误报成"泄露"。
-        ok "公网 IPv6: $v6（$v6as）—— 与出口同属 $exit_asn，是出口节点自己的 IPv6，未泄露"
-        info "注：ip-api 把该 IPv6 定位在 $v6country、把出口 IPv4 定位在 $ip_country —— 同 ASN 时以 ASN 为准，避免误报。"
+        ok "公网 IPv6: ${v6}（${v6as}）—— 与出口同属 ${exit_asn}，是出口节点自己的 IPv6，未泄露"
+        info "注：ip-api 把该 IPv6 定位在 ${v6country}、把出口 IPv4 定位在 $ip_country —— 同 ASN 时以 ASN 为准，避免误报。"
     elif [ -n "$up_v6cc" ]; then
-        bad "公网 IPv6: $v6 归属 $v6country（$v6as），与出口 $ip_country（${ip_as:-未知 ASN}）既不同国也不同 ASN —— IPv6 绕过 VPN 暴露真实位置！"
+        bad "公网 IPv6: $v6 归属 ${v6country}（${v6as}），与出口 ${ip_country}（${ip_as:-未知 ASN}）既不同国也不同 ASN —— IPv6 绕过 VPN 暴露真实位置！"
         info "修复：关闭物理网卡的 IPv6，或让 VPN(TUN) 接管 IPv6 隧道。"
     else
-        warn "存在公网 IPv6: $v6，但无法查询其归属以判定是否泄露"
+        warn "存在公网 IPv6: ${v6}，但无法查询其归属以判定是否泄露"
         info "若该 IPv6 不属于你的 VPN 出口，请关闭网卡 IPv6 或让 VPN 接管 IPv6。"
     fi
 else

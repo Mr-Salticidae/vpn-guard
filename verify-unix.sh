@@ -80,7 +80,7 @@ if command -v node >/dev/null 2>&1; then
   got=$(bash ./app-vpn.sh node -- -e 'process.stdout.write("TZPROBE:"+Intl.DateTimeFormat().resolvedOptions().timeZone)' 2>/dev/null \
         | grep -aoE 'TZPROBE:[A-Za-z/_]+' | head -1 | cut -d: -f2)
   echo "    脚本宣称注入: ${want:-<空>}    子进程实际报告: ${got:-<空>}"
-  if [ -n "$want" ] && [ "$want" = "$got" ]; then ok "TZ 确实到达了子进程"; else no "TZ 未到达子进程（want=$want got=$got）"; fi
+  if [ -n "$want" ] && [ "$want" = "$got" ]; then ok "TZ 确实到达了子进程"; else no "TZ 未到达子进程（want=$want got=${got}）"; fi
 else
   note "无 node，跳过注入验证（可换任意读 TZ 的程序自行确认）"
 fi
@@ -101,7 +101,7 @@ if [ -n "$CHROME" ] && [ -f ./webrtc-leak-test.html ]; then
   wait $cpid 2>/dev/null || true; kill $kpid 2>/dev/null || true
   v=$(grep -oE 'WEBRTC RESULT:[A-Z_]+' /tmp/rtcsmoke.out 2>/dev/null | head -1 | sed 's/.*://')
   case "$v" in
-    OK|LEAK|NO_SRFLX|SRFLX_NO_EXITREF) ok "检测页跑到终态（判定=$v），逻辑无报错" ;;
+    OK|LEAK|NO_SRFLX|SRFLX_NO_EXITREF) ok "检测页跑到终态（判定=${v}），逻辑无报错" ;;
     PENDING|UNSUPPORTED) no "检测页停在 ${v}——可能 JS 报错或 RTCPeerConnection 不可用" ;;
     *) note "无终态输出（本机可能封了 STUN/出网），跳过冒烟" ;;
   esac

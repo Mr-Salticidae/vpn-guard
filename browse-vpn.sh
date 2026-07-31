@@ -134,7 +134,7 @@ else
     fi
     cc=$ip_cc; iana=$ip_tz; ipOffset=$ip_offset
     if [ -n "$COUNTRY" ] && [ "$COUNTRY" != "$cc" ]; then
-        echo "${C_YELLOW}  你指定了国家 $COUNTRY，但探测到出口在 $cc；语言以你指定的为准，时区跟随真实出口。${C_RESET}"
+        echo "${C_YELLOW}  你指定了国家 ${COUNTRY}，但探测到出口在 ${cc}；语言以你指定的为准，时区跟随真实出口。${C_RESET}"
         cc=$COUNTRY
     fi
 fi
@@ -144,7 +144,7 @@ p=$(preset "$cc")
 if [ -n "$p" ]; then
     preset_tz=${p%%|*}; lang=${p#*|}
 else
-    echo "${C_YELLOW}未预置国家 $cc，语言用通用 en-US。${C_RESET}"
+    echo "${C_YELLOW}未预置国家 ${cc}，语言用通用 en-US。${C_RESET}"
     preset_tz=""; lang="en-US,en"
 fi
 # 时区优先级：真实出口 IANA 时区 > 预设兜底

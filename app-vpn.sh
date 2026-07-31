@@ -32,6 +32,11 @@
 
 set -u
 
+# 注意：本文件带中文输出，凡是变量后面紧跟全角字符的地方一律写成 ${变量} 花括号形式。
+# macOS 自带的 bash 3.2 会把多字节字符的首字节当成变量名的一部分（例如「退出码 」加变量 rc
+# 再加全角右括号，会被解析成变量 rc\xef），在 set -u 下直接报 unbound variable 退出。
+# CI 里有一条 perl 扫描守着这条规则，注释里也不要出现反例，否则会被一并判违规。
+
 C_CYAN=$'\033[36m'; C_GRAY=$'\033[90m'; C_YELLOW=$'\033[33m'
 C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_MAGENTA=$'\033[35m'; C_RESET=$'\033[0m'
 ok()   { echo "${C_GREEN}  [ OK ] $1${C_RESET}"; }
@@ -54,7 +59,7 @@ for a in "$@"; do
         --country=*)   COUNTRY=${a#*=} ;;
         --proxy=*)     PROXY=${a#*=} ;;
         -h|--help)     sed -n '3,30p' "$0"; exit 0 ;;
-        -*)            echo "未知参数: $a（目标程序自己的参数请放在 -- 之后）" >&2; exit 1 ;;
+        -*)            echo "未知参数: ${a}（目标程序自己的参数请放在 -- 之后）" >&2; exit 1 ;;
         *)             if [ -z "$APP" ]; then APP=$a; else APP_ARGS+=("$a"); APP_ARGC=$((APP_ARGC+1)); fi ;;
     esac
 done
@@ -181,9 +186,9 @@ case "$route_if" in
     utun*|tun*|tap*|wg*|Meta*|meta*|mihomo*|sing*) tun_active=1 ;;
 esac
 if [ "$tun_active" -eq 1 ]; then
-    ok "TUN 模式（$route_if）—— 全局流量已被接管，桌面应用/CLI 本来就走隧道"
+    ok "TUN 模式（${route_if}）—— 全局流量已被接管，桌面应用/CLI 本来就走隧道"
 fi
-[ -n "$sys_proxy" ] && info "系统代理     : $sys_proxy（Chrome 认它，Node/Rust CLI 与 Electron 主进程不认）"
+[ -n "$sys_proxy" ] && info "系统代理     : ${sys_proxy}（Chrome 认它，Node/Rust CLI 与 Electron 主进程不认）"
 
 proxy_url=""; proxy_source=""
 if [ -n "$PROXY" ]; then      proxy_url=$PROXY;    proxy_source="你用 --proxy 指定的"
@@ -218,7 +223,7 @@ if [ "$ip_status" = "success" ]; then
     [ "$ip_proxy" = "true" ] || [ "$ip_hosting" = "true" ] && warn "该 IP 被标记为 proxy/hosting，高风控平台可能拦截。"
     cc=$ip_cc; tz=$ip_tz
     if [ -n "$COUNTRY" ] && [ "$COUNTRY" != "$cc" ]; then
-        warn "你指定了国家 $COUNTRY，但出口在 $cc；语言按你指定的走，时区仍跟随真实出口。"
+        warn "你指定了国家 ${COUNTRY}，但出口在 ${cc}；语言按你指定的走，时区仍跟随真实出口。"
         cc=$COUNTRY
     fi
 else
@@ -227,12 +232,12 @@ else
     fi
     warn "探测失败，改用手动指定的国家 $COUNTRY"
     cc=$COUNTRY; tz=$(fallback_tz "$cc")
-    [ -z "$tz" ] && { bad "未预置国家 $cc，探测又失败，无法决定时区。"; exit 1; }
+    [ -z "$tz" ] && { bad "未预置国家 ${cc}，探测又失败，无法决定时区。"; exit 1; }
 fi
 
 # ---- 2) 决定语言 ----
 lang=$(lang_preset "$cc")
-if [ -z "$lang" ]; then warn "未预置国家 $cc，语言退回通用 en-US。"; lang="en-US,en"; fi
+if [ -z "$lang" ]; then warn "未预置国家 ${cc}，语言退回通用 en-US。"; lang="en-US,en"; fi
 primary=${lang%%,*}
 posix_locale="$(echo "$primary" | tr '-' '_').UTF-8"
 
@@ -294,5 +299,5 @@ env "${ENV_PAIRS[@]}" "$TARGET" ${APP_ARGS[@]+"${APP_ARGS[@]}"}
 rc=$?
 
 printf '%s\n' "${C_GRAY}------------------------------------------------------------${C_RESET}"
-echo "${C_GREEN}会话结束（退出码 $rc）。当前 shell 与系统设置从未被改动。${C_RESET}"
+echo "${C_GREEN}会话结束（退出码 ${rc}）。当前 shell 与系统设置从未被改动。${C_RESET}"
 exit $rc
