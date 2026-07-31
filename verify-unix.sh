@@ -68,12 +68,30 @@ fi
 echo; echo "==== 6) 语法检查 ===="
 bash -n ./vpn-leak-audit.sh 2>/dev/null && ok "vpn-leak-audit.sh 语法 OK" || no "vpn-leak-audit.sh 语法错误"
 bash -n ./browse-vpn.sh 2>/dev/null && ok "browse-vpn.sh 语法 OK" || no "browse-vpn.sh 语法错误"
+bash -n ./app-vpn.sh 2>/dev/null && ok "app-vpn.sh 语法 OK" || no "app-vpn.sh 语法错误"
 
 echo; echo "==== 7) browse-vpn.sh --dry-run（端到端，不开浏览器）===="
 bash ./browse-vpn.sh --dry-run >/tmp/bv.log 2>&1
 if grep -q '将使用' /tmp/bv.log; then ok "DryRun 走通并输出决策"; sed 's/^/    /' /tmp/bv.log | grep -E '将使用|时区|⚠'; else no "DryRun 未产出决策，见 /tmp/bv.log"; cat /tmp/bv.log; fi
 
-echo; echo "==== 8) WebRTC 检测页冒烟（真 Chrome 跑完检测逻辑）===="
+echo; echo "==== 8) app-vpn.sh 进程级 TZ 注入（桌面应用/CLI 的核心机制）===="
+if command -v node >/dev/null 2>&1; then
+  want=$(bash ./app-vpn.sh node --dry-run 2>/dev/null | grep -aoE 'TZ=[A-Za-z/_]+' | head -1 | cut -d= -f2)
+  got=$(bash ./app-vpn.sh node -- -e 'process.stdout.write("TZPROBE:"+Intl.DateTimeFormat().resolvedOptions().timeZone)' 2>/dev/null \
+        | grep -aoE 'TZPROBE:[A-Za-z/_]+' | head -1 | cut -d: -f2)
+  echo "    脚本宣称注入: ${want:-<空>}    子进程实际报告: ${got:-<空>}"
+  if [ -n "$want" ] && [ "$want" = "$got" ]; then ok "TZ 确实到达了子进程"; else no "TZ 未到达子进程（want=$want got=$got）"; fi
+else
+  note "无 node，跳过注入验证（可换任意读 TZ 的程序自行确认）"
+fi
+
+echo; echo "==== 9) 桌面应用/CLI 出口一致性（自查第 2 项的机制）===="
+b_ip=$(curl -fsS --max-time 10 --noproxy '*' "http://ip-api.com/line/?fields=query" 2>/dev/null)
+n_ip=$(curl -fsS --max-time 10 "http://ip-api.com/line/?fields=query" 2>/dev/null)
+echo "    不认代理时出口: ${b_ip:-<取不到>}    默认出口: ${n_ip:-<取不到>}"
+if [ -n "$b_ip" ]; then ok "--noproxy 探测可用（第 2 项能给出判定）"; else note "取不到裸出口（网络受限），第 2 项会优雅跳过"; fi
+
+echo; echo "==== 10) WebRTC 检测页冒烟（真 Chrome 跑完检测逻辑）===="
 if [ -n "$CHROME" ] && [ -f ./webrtc-leak-test.html ]; then
   # 硬超时兜底：封了 STUN/出网时无头 Chrome 会卡住，20s 强杀，避免脚本挂起
   "$CHROME" --headless=new --disable-gpu --no-sandbox --virtual-time-budget=8000 \

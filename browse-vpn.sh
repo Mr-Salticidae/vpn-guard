@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-#   browse-vpn.sh  —  通用一致性浏览会话（macOS / Linux 版，自动识别出口国）
+#   browse-vpn.sh  —  通用一致性浏览会话（macOS / Linux 版，自动识别出口国）   vpn-guard v1.0.0
 #   作用：探测当前 VPN 出口所在国 → 用 TZ 环境变量让 Chrome 按出口国报时区
 #         （只影响这个 Chrome 进程，不改系统时区、无需还原）→
 #         用独立 Chrome 配置启动（语言匹配出口国、关闭浏览器 DoH 走隧道解析）。

@@ -5,7 +5,9 @@
 **English** | [中文](README.md)
 
 [![verify](https://github.com/Mr-Salticidae/vpn-guard/actions/workflows/verify.yml/badge.svg)](https://github.com/Mr-Salticidae/vpn-guard/actions/workflows/verify.yml)
-(every push runs on real cloud macOS + Linux: syntax / shellcheck / leak audit / real-Chrome `TZ` verification)
+[![version](https://img.shields.io/github/v/tag/Mr-Salticidae/vpn-guard?label=version)](https://github.com/Mr-Salticidae/vpn-guard/releases)
+(every push runs on real cloud macOS + Linux: syntax / shellcheck / leak audit / real-Chrome `TZ` /
+`app-vpn` process-scoped `TZ` injection verification)
 
 > A cross-platform toolkit (PowerShell for **Windows**, Bash for **macOS / Linux**) to
 > **audit VPN leaks** (IP / DNS / WebRTC / IPv6) and keep your browser fingerprint
@@ -26,6 +28,41 @@ the same country.
 > ⚠️ Intended for legitimate use: accessing academic / research / public resources blocked
 > by regional restrictions, and personal privacy protection. Follow the laws of your
 > jurisdiction and the terms of service of the platforms you visit.
+
+---
+
+## Scope — browser? desktop app? CLI?
+
+A common misconception is that this toolkit only covers the browser. Here's the actual split:
+
+| | Browser (Chrome) | Desktop apps (Claude / ChatGPT / Cursor — Electron) | CLIs (Codex CLI / Claude Code / git / curl) |
+|---|---|---|---|
+| `vpn-leak-audit` | ✅ all 8 checks | ✅ all but #7 (WebRTC) | ✅ all but #7 (WebRTC) |
+| `browse-vpn` session | ✅ built for it | ❌ out of reach | ❌ out of reach |
+| `app-vpn` session | — (use `browse-vpn`) | ✅ proxy / locale; timezone: see below | ✅ proxy / timezone / locale, all of it |
+
+**Desktop apps have a leak path the browser doesn't** — which is the whole reason `app-vpn` exists:
+
+> Browsers and .NET programs read the OS proxy settings automatically. But **CLIs written in
+> Node / Rust / Go (Codex CLI, Claude Code CLI) and Electron's Node main process do not** —
+> they only honor the `HTTP_PROXY` / `HTTPS_PROXY` environment variables.
+> So on a machine with **system proxy on but no TUN**: the browser is fine, while those
+> programs connect directly and expose your real IP.
+> **Check #2** of the audit tests exactly this path (it replays a "proxy-unaware program" with
+> `curl --noproxy '*'` and compares the result against the browser's exit IP).
+
+**Whether the timezone can be scoped per-process depends on the runtime, not the platform**
+(all verdicts below are measured, not assumed):
+
+| Target program | Honors `TZ` on Windows? | What the toolkit does |
+|---|---|---|
+| Node / Rust / Go CLIs | ✅ yes | `app-vpn.ps1` injects `TZ` directly — **system clock untouched** |
+| Chromium / Electron GUI | ❌ no | needs `app-vpn.ps1 -SystemTz` to switch the system timezone temporarily, auto-restored on exit |
+| **Anything** on macOS / Linux | ✅ yes (Chromium included) | always process-scoped `TZ`; system timezone never changes |
+
+> In one line: **to cover every program in one shot, turn on your client's TUN mode.**
+> `app-vpn` is the per-application answer when you don't have TUN (or when you also want a
+> single program's timezone / locale aligned).
 
 ---
 
@@ -76,10 +113,19 @@ powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoSpeedTest  # sk
 
 Reports with red / yellow / green: **detected proxy client and traffic-takeover mode**
 (TUN / system proxy / none — each with its leak surface), public IP + geolocation,
-proxy/hosting flags, IPv6 leak surface, **timezone consistency** (system vs exit IP),
-locale consistency, DNS resolution path (static config + **active DNS-leak test**), a
-**WebRTC active-detection entry point**, and **link quality** (handshake + throughput —
-is this node fast enough to watch video). Re-run after switching nodes or countries.
+proxy/hosting flags, **desktop-app / CLI exit consistency**, IPv6 leak surface,
+**timezone consistency** (system vs exit IP), locale consistency, DNS resolution path
+(static config + **active DNS-leak test**), a **WebRTC active-detection entry point**, and
+**link quality** (handshake + throughput — is this node fast enough to watch video).
+Re-run after switching nodes or countries.
+
+> **Desktop-app / CLI exit test** (check #2): fires a request via `curl --noproxy '*'` to
+> replay what a *completely proxy-unaware program* would do, then compares it against the
+> browser exit IP from check #1. **A mismatch means Claude / Codex-class programs are
+> bypassing the proxy and connecting directly.** Passive inspection can't see this: the
+> system proxy is enabled in the registry and the browser is perfectly fine, while the
+> Node / Electron main process simply never reads it. On a leak verdict it prints both fixes
+> (enable TUN, or launch via `app-vpn`).
 
 > **Active DNS-leak test** (on by default): triggers real resolution of random subdomains and
 > checks *which resolvers actually answered* (with country / ASN), comparing them to the exit
@@ -88,7 +134,7 @@ is this node fast enough to watch video). Re-run after switching nodes or countr
 > (same one dnsleaktest.com's official CLI uses); it only sends random subdomains, no personal
 > data. Skip it with `--no-dns-leak` / `-NoDnsLeak`.
 
-> **Link-quality test** (on by default): the first six checks answer *"am I safe?"*; this one
+> **Link-quality test** (on by default): the first seven checks answer *"am I safe?"*; this one
 > answers *"is this node actually usable?"* It measures the TLS handshake time and real
 > throughput **through the proxy**, then maps it to a 480p / 720p / 1080p verdict.
 > **Don't use `ping` to judge speed** — under fake-ip every hostname resolves to `198.18.x.x`
@@ -108,13 +154,18 @@ is this node fast enough to watch video). Re-run after switching nodes or countr
   Location  : <City> / <Country> (XX)
   [ OK ] not flagged as proxy
   [ OK ] not flagged as hosting/datacenter IP
-2) IPv6 leak surface   [ OK ] public IPv6 belongs to exit country (tunneled, no leak)
-3) Timezone check      [FAIL] system UTC+8 vs exit UTC+9, off by +1h  ← #1 giveaway
-4) Language / locale   [WARN] browser default language doesn't match exit country
-5) DNS resolution path [ OK ] fake-ip tunnel resolution (static config)
+2) Desktop app / CLI exit
+  Proxy env vars : not set — these programs won't use a proxy on their own; only TUN covers them
+  [FAIL] proxy-unaware programs exit via <real IP> (China / <your ISP>),
+         which differs from the browser exit <exit IP> (Japan) — real IP is leaking!
+         Affected: Codex CLI, Claude Code CLI, the Node main process of Claude/ChatGPT desktop…
+3) IPv6 leak surface   [ OK ] public IPv6 belongs to exit country (tunneled, no leak)
+4) Timezone check      [FAIL] system UTC+8 vs exit UTC+9, off by +1h  ← #1 giveaway
+5) Language / locale   [WARN] browser default language doesn't match exit country
+6) DNS resolution path [ OK ] fake-ip tunnel resolution (static config)
    Active DNS-leak test [FAIL] resolvers in China but exit is Japan — DNS leaking to local ISP
-6) WebRTC leak surface [ OK ] test page ready — run: browse-vpn --webrtc
-7) Link quality        [ OK ] TLS handshake 0.27s — node responds fast
+7) WebRTC leak surface [ OK ] test page ready — run: browse-vpn --webrtc
+8) Link quality        [ OK ] TLS handshake 0.27s — node responds fast
                        [ OK ] 167.8 Mbps down — smooth 1080p
 ```
 </details>
@@ -163,7 +214,58 @@ Platform difference (where the Unix version is nicer):
 > Key design: the timezone always follows the **real exit IP** (not the country argument),
 > so you never end up with a new contradiction like "IP in Tokyo, timezone set to New York".
 
-### 3. `webrtc-leak-test.html` — active WebRTC leak detection
+### 3. `app-vpn` — consistent session for desktop apps / CLIs (**use this for Claude, Codex…**)
+
+`browse-vpn` only affects the one Chrome it launches. **Claude desktop / Codex CLI /
+Claude Code / Cursor are entirely out of its reach** — this script is for them.
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File .\app-vpn.ps1 -List      # list known app aliases
+powershell -ExecutionPolicy Bypass -File .\app-vpn.ps1 codex      # run Codex CLI in a consistent env
+powershell -ExecutionPolicy Bypass -File .\app-vpn.ps1 claude     # Claude Code CLI
+powershell -ExecutionPolicy Bypass -File .\app-vpn.ps1 claude-desktop -SystemTz
+    # Claude desktop (Electron): -SystemTz is required for the timezone to follow; auto-restored on exit
+powershell -ExecutionPolicy Bypass -File .\app-vpn.ps1 "D:\any\app.exe"   # any executable
+powershell -ExecutionPolicy Bypass -File .\app-vpn.ps1 -Print     # just print the env vars for another terminal
+powershell -ExecutionPolicy Bypass -File .\app-vpn.ps1 codex -DryRun
+```
+```bash
+# macOS / Linux
+./app-vpn.sh --list
+./app-vpn.sh codex
+./app-vpn.sh claude-desktop          # Chromium honors TZ on Unix, so GUI apps need no extra flag
+./app-vpn.sh --print
+./app-vpn.sh codex --dry-run
+./app-vpn.sh codex -- --model o3     # everything after -- is passed through verbatim
+```
+
+What it does: **probes the current exit country** → injects, **scoped to that one process**,
+`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` (both cases, since language ecosystems disagree on
+which they read), `NO_PROXY=localhost,127.0.0.1,::1,*.local` (local MCP servers and dev
+servers must not be proxied), `TZ`, and `LANG` / `LC_ALL` → launches it → restores on exit.
+
+**Built-in aliases**: `codex` · `claude` (Claude Code CLI) · `claude-desktop` · `cursor` ·
+`code` · `chatgpt` — or pass any path or PATH command name. On Windows, when the hard-coded
+paths miss, it looks up the real install location in the registry uninstall keys (so
+non-C-drive installs are found).
+
+> **Passing arguments to the target program**: just append them — anything this script doesn't
+> recognize is forwarded verbatim (`app-vpn.ps1 node -e "..."`, `./app-vpn.sh codex resume --last`).
+> The exception is on Windows, where a short option that happens to be a unique prefix of one of
+> this script's parameters (`-c` → `-Country`, `-s` → `-SystemTz`, `-d` → `-DryRun`, `-l` → `-List`)
+> gets swallowed by PowerShell. Pass the whole command via `-Run` instead:
+> `app-vpn.ps1 -Run "codex -c model=gpt-5 -s workspace-write"`.
+> (PowerShell's `-File` mode does not support a `--` separator, hence `-Run` on Windows and plain
+> `--` on Unix.)
+
+> **No system settings are changed**: environment variables are injected only into the launched
+> process and restored before the script exits; user-level and machine-level environment
+> variables are never written. The single exception is an explicit `-SystemTz` on Windows, which
+> temporarily switches the system timezone (Chromium ignores `TZ`, there is no alternative) and
+> restores it in a `finally` block.
+
+### 4. `webrtc-leak-test.html` — active WebRTC leak detection
 
 To punch through NATs, WebRTC sends UDP to a STUN server and gets back "the public IP the world
 sees for you". **If that UDP doesn't go through the VPN tunnel, it reveals your real IP** — even
@@ -183,7 +285,7 @@ front-end, no external dependencies beyond public STUN servers, uploads nothing.
 > Fixing a leak: disable WebRTC via a browser extension, or have your client take over all UDP in
 > **TUN mode**.
 
-### 4. Per-country shortcuts (Windows, double-click / no arguments to remember)
+### 5. Per-country shortcuts (Windows, double-click / no arguments to remember)
 
 `browse-jp` Japan · `browse-us` US · `browse-sg` Singapore · `browse-hk` Hong Kong ·
 `browse-gb` UK · `browse-de` Germany · `browse-kr` Korea.
@@ -202,8 +304,11 @@ in `browse-vpn.sh`.
 
 | Signal | Windows | macOS / Linux |
 |---|---|---|
-| Timezone | `tzutil /s` temporarily switches the system timezone (Chrome ignores `TZ`), auto-restored via `finally` when the session ends | Chrome launched with `TZ=<IANA timezone>` — process-scoped, system timezone untouched |
-| Language | Chrome `--lang` / `--accept-lang` + `intl.selected_languages` in the isolated profile; system locale untouched | same |
+| Timezone (browser) | `tzutil /s` temporarily switches the system timezone (Chrome ignores `TZ`), auto-restored via `finally` when the session ends | Chrome launched with `TZ=<IANA timezone>` — process-scoped, system timezone untouched |
+| Timezone (desktop/CLI) | Node / Rust / Go programs **do honor `TZ`**, so `app-vpn` injects it per-process; Electron GUIs don't, hence the explicit `-SystemTz` | always process-scoped `TZ` (Chromium honors it on Unix too); system timezone never touched |
+| Proxy (desktop/CLI) | `app-vpn` injects `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` (both cases); address from `-Proxy` or the system-proxy registry key | same, address from `--proxy` or macOS `scutil --proxy` / existing Linux env vars |
+| Desktop-app leak test | `curl --noproxy '*'` replays a "completely proxy-unaware program" and its exit IP is compared against the browser-side one (.NET, which does use the system proxy); a mismatch is a leak | same (curl doesn't read system proxy settings on macOS/Linux either, so the logic is identical) |
+| Language | Chrome `--lang` / `--accept-lang` + `intl.selected_languages` in the isolated profile; system locale untouched. Desktop/CLI get `LANG` / `LC_ALL` from `app-vpn` | same |
 | DNS (static) | "Secure DNS (DoH)" disabled in the isolated Chrome profile, forcing system DNS (TUN mode = fake-ip tunnel; in system-proxy mode hostnames are resolved remotely by the proxy), so the browser can't leak its own lookups | same |
 | DNS (active test) | Triggers real connections to random subdomains to force recursive resolution, then uses bash.ws to look up which resolvers actually answered (country/ASN) and compares to the exit country | same (curl-triggered, identical logic) |
 | IP | Taken over by TUN / system proxy / `--proxy`; the toolkit audits the takeover mode | same |
@@ -221,7 +326,20 @@ in `browse-vpn.sh`.
 - **Windows only**: switching the system timezone makes **every program's** clock follow the
   exit country during the session; local-time-triggered scheduled tasks shift accordingly —
   expected, and auto-restored when the browser closes. The macOS / Linux version never
-  touches the system timezone.
+  touches the system timezone. (`app-vpn.ps1` only switches it when you explicitly pass
+  `-SystemTz`; the CLI path never does.)
+- **`app-vpn` works by convention, not by force**: it injects `HTTPS_PROXY` and friends, which
+  only helps if the target program bothers to read them. Nearly everything in the Node / Rust /
+  Go / Python ecosystems does — but **a program that hard-codes direct connections, or ships a
+  network stack that ignores these variables entirely, is beyond its reach**. The only way to
+  cover arbitrary programs is TUN mode (kernel-level takeover). Audit check #2 measures exactly
+  that worst case — a green there is what proves TUN is really covering you.
+- **Electron apps get partial timezone coverage**: on Windows the injected `TZ` only reaches the
+  Node main process; the Chromium renderer (the web content you actually see in the app) still
+  reads the system timezone, so `-SystemTz` is required for consistency. Not an issue on
+  macOS / Linux.
+- **`-Print` output contains the proxy address** — usually just `127.0.0.1:<port>` with no
+  credentials, but use your judgment before pasting it somewhere public.
 - The macOS / Linux scripts rely on the local tzdata database to resolve IANA timezone names
   (present on mainstream systems; minimal container images may need `tzdata` installed —
   the script warns when it can't find it).

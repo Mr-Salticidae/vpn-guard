@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 #
-#   vpn-leak-audit.sh  —  VPN 出口一致性 / 泄露自查（macOS / Linux 版）
+#   vpn-leak-audit.sh  —  VPN 出口一致性 / 泄露自查（macOS / Linux 版）   vpn-guard v1.0.0
 #   用途：使用 VPN 访问受地区限制的海外平台前，一键检查真实身份是否泄露、
 #         以及浏览器指纹（时区/语言）是否与出口 IP 所在国一致。
+#   覆盖范围：绝大多数项目是系统级的，浏览器与桌面应用/CLI 同样适用。
+#         第 2 项专测「不认系统代理的程序」（Claude/Codex 桌面版与 CLI、Electron 主进程）的真实出口，
+#         第 7 项 WebRTC 仅适用于浏览器。
 #   用法：bash ./vpn-leak-audit.sh   （或 chmod +x 后直接 ./vpn-leak-audit.sh）
 #   只读检查，不修改任何系统设置。依赖：bash 3.2+、curl（macOS/主流发行版自带）。
 #
@@ -162,12 +165,15 @@ line
 head_ "1) 公网出口 IP 与地理位置"
 # ip-api 的 line 格式按 fields 顺序逐行返回，无需 JSON 解析器
 resp=$(curl -fsS --max-time 15 \
-  "http://ip-api.com/line/?fields=status,country,countryCode,city,timezone,offset,isp,query,proxy,hosting" 2>/dev/null)
-ip_status=""; ip_country=""; ip_cc=""; ip_city=""; ip_tz=""; ip_offset=""; ip_isp=""; ip_query=""; ip_proxy=""; ip_hosting=""
+  "http://ip-api.com/line/?fields=status,country,countryCode,city,timezone,offset,isp,as,query,proxy,hosting" 2>/dev/null)
+ip_status=""; ip_country=""; ip_cc=""; ip_city=""; ip_tz=""; ip_offset=""; ip_isp=""; ip_as=""
+ip_query=""; ip_proxy=""; ip_hosting=""
 if [ -n "$resp" ]; then
-    # 注意：ip-api 的 line 格式按其固定字段顺序返回（query 在最后），与请求参数顺序无关
+    # 注意：ip-api 的 line 格式按其固定字段顺序返回（query 在最后），与请求参数顺序无关。
+    # as 排在 isp 之后、proxy 之前 —— 顺序错一位后面全串，改字段时务必先实测确认。
     { read -r ip_status; read -r ip_country; read -r ip_cc; read -r ip_city; read -r ip_tz
-      read -r ip_offset; read -r ip_isp; read -r ip_proxy; read -r ip_hosting; read -r ip_query; } <<EOF
+      read -r ip_offset; read -r ip_isp; read -r ip_as; read -r ip_proxy; read -r ip_hosting
+      read -r ip_query; } <<EOF
 $resp
 EOF
 fi
@@ -183,8 +189,53 @@ else
 fi
 line
 
-# ---------- 2. IPv6 泄露面 ----------
-head_ "2) IPv6 泄露面"
+# ---------- 2. 桌面应用 / CLI 出口（不认系统代理的程序）----------
+head_ "2) 桌面应用 / CLI 出口（Claude、Codex、Electron 主进程……）"
+info "Chrome 会自动读系统代理；但 Node / Rust / Go 写的 CLI 与 Electron 的 Node 主进程不读，"
+info "只认 HTTP_PROXY / HTTPS_PROXY 环境变量。下面用「强制不走代理的 curl」模拟这类程序实测真实出口。"
+
+env_proxy=""
+for n in HTTPS_PROXY HTTP_PROXY ALL_PROXY https_proxy http_proxy all_proxy NO_PROXY no_proxy; do
+    # bash 3.2 没有 ${!n} 间接展开，只能 eval；先赋空值以免 set -u / shellcheck 误报
+    v=""; eval "v=\${$n:-}"
+    [ -n "$v" ] && env_proxy="${env_proxy:+$env_proxy; }$n=$v"
+done
+if [ -n "$env_proxy" ]; then info "代理环境变量 : $env_proxy"
+else info "代理环境变量 : 未设置 —— 这类程序不会主动走代理，只能靠 TUN 兜底"; fi
+
+if [ "$ip_status" != "success" ]; then
+    warn "上一项未取到浏览器侧出口 IP —— 无从对比，跳过"
+else
+    # --noproxy '*' 让 curl 忽略一切代理设置（含环境变量），精确复刻「完全不认代理的程序」的行为
+    bare=$(curl -fsS --max-time 12 --noproxy '*' \
+      "http://ip-api.com/line/?fields=status,country,countryCode,isp,query" 2>/dev/null)
+    b_status=""; b_country=""; b_cc=""; b_isp=""; b_query=""
+    if [ -n "$bare" ]; then
+        # shellcheck disable=SC2034
+        { read -r b_status; read -r b_country; read -r b_cc; read -r b_isp; read -r b_query; } <<EOF
+$bare
+EOF
+    fi
+    if [ "$b_status" != "success" ]; then
+        warn "实测请求失败 —— 若确实完全不通，说明这类程序在当前环境根本连不上网（也是一种信号）"
+    elif [ "$b_query" = "$ip_query" ]; then
+        if [ "$TAKEOVER" = "none" ]; then
+            bad "出口 $b_query 与浏览器一致，但当前没有任何接管 —— 两者都是直连，真实 IP 全程暴露"
+        else
+            ok "出口 $b_query 与浏览器一致 —— 不认代理的程序也被隧道接管，Claude/Codex 等不会泄露"
+        fi
+    else
+        bad "不认代理的程序直连出口 $b_query（$b_country / $b_isp），与浏览器出口 $ip_query（$ip_country）不一致 —— 真实 IP 正在泄露！"
+        info "受影响：Codex CLI、Claude Code CLI、Claude/ChatGPT 桌面版的 Node 主进程、各类自动更新与遥测。"
+        info "修复 A（推荐，一劳永逸）：开客户端的 TUN 模式，全局接管所有程序。"
+        info "修复 B（按应用）：用 ./app-vpn.sh 启动它们（进程级注入 HTTPS_PROXY + TZ，不改任何系统设置）。"
+        [ -n "$env_proxy" ] && info "注：你已设了代理环境变量 —— 认这些变量的程序（多数 Node/Rust CLI）不受影响，不认的仍在泄露。"
+    fi
+fi
+line
+
+# ---------- 3. IPv6 泄露面 ----------
+head_ "3) IPv6 泄露面"
 v6=$(curl -fsS --max-time 8 "https://api64.ipify.org" 2>/dev/null)
 if [ -n "$v6" ] && [[ "$v6" == *:* ]]; then
     # 关键：有公网 IPv6 不等于泄露。若它归属与出口一致，说明 IPv6 也走了隧道（是出口的 v6）；
@@ -195,10 +246,17 @@ if [ -n "$v6" ] && [[ "$v6" == *:* ]]; then
     v6as=$(printf '%s' "$v6json" | grep -o '"as":"[^"]*"' | sed 's/.*"as":"//;s/"//')
     up_v6cc=$(printf '%s' "$v6cc" | tr '[:lower:]' '[:upper:]')
     up_exit=$(printf '%s' "$ip_cc" | tr '[:lower:]' '[:upper:]')
+    # "AS14061 DigitalOcean, LLC" → "AS14061"
+    exit_asn=${ip_as%% *}; v6_asn=${v6as%% *}
     if [ -n "$up_exit" ] && [ -n "$up_v6cc" ] && [ "$up_v6cc" = "$up_exit" ]; then
         ok "公网 IPv6: $v6（$v6country / $v6as）—— 与出口国一致，IPv6 也走隧道，未泄露"
+    elif [ -n "$exit_asn" ] && [ -n "$v6_asn" ] && [ "$v6_asn" = "$exit_asn" ]; then
+        # 国家对不上但 ASN 相同：这是出口节点自己的 IPv6，只是 ip-api 对同一台机器的 v4/v6
+        # 地理定位不一致（DigitalOcean / Vultr 等云厂商常见）。只比国家会在这里误报成"泄露"。
+        ok "公网 IPv6: $v6（$v6as）—— 与出口同属 $exit_asn，是出口节点自己的 IPv6，未泄露"
+        info "注：ip-api 把该 IPv6 定位在 $v6country、把出口 IPv4 定位在 $ip_country —— 同 ASN 时以 ASN 为准，避免误报。"
     elif [ -n "$up_v6cc" ]; then
-        bad "公网 IPv6: $v6 归属 $v6country（$v6as），与出口国 $ip_country 不一致 —— IPv6 绕过 VPN 暴露真实位置！"
+        bad "公网 IPv6: $v6 归属 $v6country（$v6as），与出口 $ip_country（${ip_as:-未知 ASN}）既不同国也不同 ASN —— IPv6 绕过 VPN 暴露真实位置！"
         info "修复：关闭物理网卡的 IPv6，或让 VPN(TUN) 接管 IPv6 隧道。"
     else
         warn "存在公网 IPv6: $v6，但无法查询其归属以判定是否泄露"
@@ -209,8 +267,8 @@ else
 fi
 line
 
-# ---------- 3. 时区一致性（头号指纹破绽）----------
-head_ "3) 时区一致性（浏览器 vs 出口 IP）"
+# ---------- 4. 时区一致性（头号指纹破绽）----------
+head_ "4) 时区一致性（浏览器 vs 出口 IP）"
 sys_offset=$(zone_to_seconds "$(date +%z)")
 if [ -L /etc/localtime ]; then
     sys_tz=$(readlink /etc/localtime | sed 's|.*zoneinfo/||')
@@ -226,27 +284,28 @@ if [ "$ip_status" = "success" ]; then
     else
         diff_h=$(( (ip_offset - sys_offset) / 3600 ))
         bad "$(printf "时区不一致，差 %+d 小时 —— 这是平台判定'你在用 VPN'的头号依据" "$diff_h")"
-        info "修复：会话前运行  ./browse-vpn.sh（用 TZ 环境变量让 Chrome 按出口国报时区，不改系统）"
+        info "修复（浏览器）  ：./browse-vpn.sh —— 用 TZ 让 Chrome 按出口国报时区，不改系统"
+        info "修复（桌面/CLI）：./app-vpn.sh <应用> —— 同样用 TZ 进程级注入（Unix 上 GUI 也认 TZ）"
     fi
 fi
 line
 
-# ---------- 4. 语言/locale 一致性 ----------
-head_ "4) 语言 / locale 一致性"
+# ---------- 5. 语言/locale 一致性 ----------
+head_ "5) 语言 / locale 一致性"
 sys_lang=${LANG:-未设置}
 info "系统区域    : $sys_lang"
 if [ -n "$ip_cc" ] && [ "$ip_status" = "success" ]; then
     if [[ "$sys_lang" == zh_CN* ]] && [ "$ip_cc" != "CN" ]; then
         warn "浏览器默认语言可能是中文，而出口在 $ip_country —— 次级指纹信号"
-        info "修复：用 browse-vpn.sh 以 --lang 覆盖浏览器语言（不改系统）。"
+        info "修复：用 browse-vpn.sh 以 --lang 覆盖浏览器语言；桌面应用/CLI 用 app-vpn.sh 注入 LANG（均不改系统）。"
     else
         ok "无明显 locale 矛盾"
     fi
 fi
 line
 
-# ---------- 5. DNS 解析路径 ----------
-head_ "5) DNS 解析路径（是否漏到本地 ISP）"
+# ---------- 6. DNS 解析路径 ----------
+head_ "6) DNS 解析路径（是否漏到本地 ISP）"
 dns_servers=""
 case "$(uname)" in
     Darwin)
@@ -290,9 +349,10 @@ else
 fi
 line
 
-# ---------- 6. WebRTC 泄露（主动检测，需真实浏览器）----------
-head_ "6) WebRTC 泄露面（主动检测）"
+# ---------- 7. WebRTC 泄露（主动检测，需真实浏览器）----------
+head_ "7) WebRTC 泄露面（主动检测 · 仅浏览器）"
 info "WebRTC 是浏览器 API，需在真实浏览器里发 STUN 才能实测，命令行只读检查覆盖不到。"
+info "本项只关乎浏览器（含 Electron 内嵌页面）；纯 CLI 工具不用 WebRTC，不受影响。"
 if [ -f "$AUDIT_DIR/webrtc-leak-test.html" ]; then
     CHROME=$(find_chrome)
     [ -n "$CHROME" ] && ok "检测页已就绪：webrtc-leak-test.html（已找到浏览器）" \
@@ -304,8 +364,8 @@ else
 fi
 line
 
-# ---------- 7. 链路质量（够不够用；与泄露无关）----------
-head_ "7) 链路质量（够不够用 · 与泄露无关）"
+# ---------- 8. 链路质量（够不够用；与泄露无关）----------
+head_ "8) 链路质量（够不够用 · 与泄露无关）"
 info "ping 在这里没有意义：fake-ip 下所有域名都解析到 198.18.x.x、ICMP 由本机应答，"
 info "节点挂了 ping 也照样秒通。只能实测走代理的 TLS 握手与实际吞吐。"
 if [ "$SPEED_TEST" != "1" ]; then

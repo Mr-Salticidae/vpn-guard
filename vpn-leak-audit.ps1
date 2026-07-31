@@ -1,7 +1,10 @@
 ﻿<#
-  vpn-leak-audit.ps1  —  VPN 出口一致性 / 泄露自查
+  vpn-leak-audit.ps1  —  VPN 出口一致性 / 泄露自查   (vpn-guard v1.0.0)
   用途：使用 VPN 访问受地区限制的海外平台前，一键检查真实身份是否泄露、
         以及浏览器指纹（时区/语言）是否与出口 IP 所在国一致。
+  覆盖范围：绝大多数项目是系统级的，浏览器与桌面应用/CLI 同样适用。
+        第 2 项专测「不认系统代理的程序」（Claude/Codex 桌面版与 CLI、Electron 主进程）的真实出口，
+        第 7 项 WebRTC 仅适用于浏览器。
   用法：右键“用 PowerShell 运行”，或在终端执行  powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1
         加 -NoDnsLeak   可跳过联网的 DNS 泄露主动实测（默认开启，走 bash.ws）。
         加 -NoSpeedTest 可跳过链路质量实测（默认开启，约 20MB 流量）。
@@ -105,7 +108,7 @@ Line
 # ---------- 1. 公网 IPv4 + 地理位置 + 代理标记 ----------
 Write-Host "1) 公网出口 IP 与地理位置" -ForegroundColor Cyan
 $ipapi = $null
-try { $ipapi = Invoke-RestMethod -Uri "http://ip-api.com/json/?fields=status,country,countryCode,city,timezone,offset,isp,query,proxy,hosting" -TimeoutSec 15 } catch {}
+try { $ipapi = Invoke-RestMethod -Uri "http://ip-api.com/json/?fields=status,country,countryCode,city,timezone,offset,isp,as,query,proxy,hosting" -TimeoutSec 15 } catch {}
 if ($ipapi -and $ipapi.status -eq 'success') {
     Info ("出口 IP   : {0}" -f $ipapi.query)
     Info ("位置      : {0} / {1} ({2})" -f $ipapi.city, $ipapi.country, $ipapi.countryCode)
@@ -118,8 +121,52 @@ if ($ipapi -and $ipapi.status -eq 'success') {
 }
 Line
 
-# ---------- 2. IPv6 泄露面 ----------
-Write-Host "2) IPv6 泄露面" -ForegroundColor Cyan
+# ---------- 2. 桌面应用 / CLI 出口（不认系统代理的程序）----------
+Write-Host "2) 桌面应用 / CLI 出口（Claude、Codex、Electron 主进程……）" -ForegroundColor Cyan
+Info "浏览器和 .NET 会自动读系统代理；但 Node / Rust / Go 写的 CLI 与 Electron 的 Node 主进程不读，"
+Info "只认 HTTP_PROXY / HTTPS_PROXY 环境变量。下面用「强制不走代理的 curl」模拟这类程序实测真实出口。"
+
+$envProxyLines = @()
+foreach ($n in 'HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','NO_PROXY') {
+    $v = [Environment]::GetEnvironmentVariable($n,'Process')
+    if (-not $v) { $v = [Environment]::GetEnvironmentVariable($n,'User') }
+    if ($v) { $envProxyLines += "$n=$v" }
+}
+if ($envProxyLines) { Info ("代理环境变量 : {0}" -f ($envProxyLines -join '; ')) }
+else { Info "代理环境变量 : 未设置 —— 这类程序不会主动走代理，只能靠 TUN 兜底" }
+
+if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
+    Warn "未找到 curl.exe（Windows 10 1803+ 自带）—— 跳过桌面应用出口实测"
+} elseif (-not ($ipapi -and $ipapi.status -eq 'success')) {
+    Warn "上一项未取到浏览器侧出口 IP —— 无从对比，跳过"
+} else {
+    # --noproxy "*" 让 curl 忽略一切代理设置（含环境变量），精确复刻「完全不认代理的程序」的行为。
+    # curl.exe 本来就不读 Windows 的 WinINET 注册表代理，这一点与 Node/Electron 主进程一致。
+    $bareRaw = & curl.exe -s --max-time 12 --noproxy "*" "http://ip-api.com/json/?fields=status,query,country,countryCode,isp" 2>$null
+    $bare = try { "$bareRaw" | ConvertFrom-Json } catch { $null }
+    if (-not $bare -or $bare.status -ne 'success') {
+        Warn "实测请求失败 —— 若确实完全不通，说明这类程序在当前环境根本连不上网（也是一种信号）"
+    } elseif ($bare.query -eq $ipapi.query) {
+        if ($TakeoverMode -eq 'none') {
+            Bad ("出口 {0} 与浏览器一致，但当前没有任何接管 —— 两者都是直连，真实 IP 全程暴露" -f $bare.query)
+        } else {
+            Ok ("出口 {0} 与浏览器一致 —— 不认代理的程序也被隧道接管，Claude/Codex 等不会泄露" -f $bare.query)
+        }
+    } else {
+        Bad ("不认代理的程序直连出口 {0}（{1} / {2}），与浏览器出口 {3}（{4}）不一致 —— 真实 IP 正在泄露！" -f `
+             $bare.query, $bare.country, $bare.isp, $ipapi.query, $ipapi.country)
+        Info "受影响：Codex CLI、Claude Code CLI、Claude/ChatGPT 桌面版的 Node 主进程、各类自动更新与遥测。"
+        Info "修复 A（推荐，一劳永逸）：开客户端的 TUN 模式，全局接管所有程序。"
+        Info "修复 B（按应用）：用 app-vpn.ps1 启动它们（进程级注入 HTTPS_PROXY + TZ，不改任何系统设置）。"
+        if ($envProxyLines) {
+            Info "注：你已设了代理环境变量 —— 认这些变量的程序（多数 Node/Rust CLI）不受影响，不认的仍在泄露。"
+        }
+    }
+}
+Line
+
+# ---------- 3. IPv6 泄露面 ----------
+Write-Host "3) IPv6 泄露面" -ForegroundColor Cyan
 $v6 = $null
 try { $v6 = Invoke-RestMethod -Uri "https://api64.ipify.org?format=json" -TimeoutSec 8 } catch {}
 if ($v6 -and $v6.ip -match ':') {
@@ -127,10 +174,19 @@ if ($v6 -and $v6.ip -match ':') {
     # 只有归属你的真实 ISP（与出口国不一致）才是绕过 VPN 的真泄露。
     $v6info = try { Invoke-RestMethod -Uri ("http://ip-api.com/json/{0}?fields=status,countryCode,country,as" -f $v6.ip) -TimeoutSec 8 } catch { $null }
     $exitCc = if ($ipapi -and $ipapi.status -eq 'success') { $ipapi.countryCode } else { "" }
+    # "AS14061 DigitalOcean, LLC" → "AS14061"
+    $exitAsn = if ($ipapi -and $ipapi.status -eq 'success' -and $ipapi.as) { ("$($ipapi.as)".Trim() -split '\s+')[0] } else { "" }
+    $v6Asn   = if ($v6info -and $v6info.as) { ("$($v6info.as)".Trim() -split '\s+')[0] } else { "" }
     if ($v6info -and $v6info.status -eq 'success' -and $exitCc -and $v6info.countryCode -eq $exitCc) {
         Ok ("公网 IPv6: {0}（{1} / {2}）—— 与出口国一致，IPv6 也走隧道，未泄露" -f $v6.ip, $v6info.country, $v6info.as)
+    } elseif ($v6info -and $v6info.status -eq 'success' -and $exitAsn -and $v6Asn -eq $exitAsn) {
+        # 国家对不上但 ASN 相同：这是出口节点自己的 IPv6，只是 ip-api 对同一台机器的 v4/v6
+        # 地理定位不一致（DigitalOcean / Vultr 等云厂商常见）。只比国家会在这里误报成"泄露"。
+        Ok ("公网 IPv6: {0}（{1}）—— 与出口同属 {2}，是出口节点自己的 IPv6，未泄露" -f $v6.ip, $v6info.as, $exitAsn)
+        Info ("注：ip-api 把该 IPv6 定位在 {0}、把出口 IPv4 定位在 {1} —— 同 ASN 时以 ASN 为准，避免误报。" -f $v6info.country, $ipapi.country)
     } elseif ($v6info -and $v6info.status -eq 'success' -and $exitCc) {
-        Bad ("公网 IPv6: {0} 归属 {1}（{2}），与出口国 {3} 不一致 —— IPv6 绕过 VPN 暴露真实位置！" -f $v6.ip, $v6info.country, $v6info.as, $ipapi.country)
+        Bad ("公网 IPv6: {0} 归属 {1}（{2}），与出口 {3}（{4}）既不同国也不同 ASN —— IPv6 绕过 VPN 暴露真实位置！" -f `
+             $v6.ip, $v6info.country, $v6info.as, $ipapi.country, $(if ($ipapi.as) { $ipapi.as } else { '未知 ASN' }))
         Info "修复：关闭物理网卡的 IPv6，或让 VPN(TUN) 接管 IPv6 隧道。"
     } else {
         Warn ("存在公网 IPv6: {0}，但无法查询其归属以判定是否泄露" -f $v6.ip)
@@ -141,8 +197,8 @@ if ($v6 -and $v6.ip -match ':') {
 }
 Line
 
-# ---------- 3. 时区一致性（头号指纹破绽）----------
-Write-Host "3) 时区一致性（浏览器 vs 出口 IP）" -ForegroundColor Cyan
+# ---------- 4. 时区一致性（头号指纹破绽）----------
+Write-Host "4) 时区一致性（浏览器 vs 出口 IP）" -ForegroundColor Cyan
 $sysOffset = [System.TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now).TotalSeconds
 $sysId = [System.TimeZoneInfo]::Local.Id
 Info ("系统时区   : {0} (UTC{1:+0;-0}:00)  —— 浏览器 JS 会据此报时区" -f $sysId, ($sysOffset/3600))
@@ -153,27 +209,29 @@ if ($ipapi -and $ipapi.status -eq 'success') {
     } else {
         $diff = ($ipapi.offset - $sysOffset)/3600
         Bad ("时区不一致，差 {0:+0;-0} 小时 —— 这是平台判定'你在用 VPN'的头号依据" -f $diff)
-        Info ("修复：会话前运行  browse-vpn.ps1（自动切到出口国时区并在关闭浏览器后还原）")
+        Info ("修复（浏览器）  ：browse-vpn.ps1 —— 自动切到出口国时区，关闭浏览器后还原")
+        Info ("修复（桌面/CLI）：app-vpn.ps1 <应用> —— Node 类程序进程级注入 TZ；")
+        Info ("                  Electron GUI 不认 TZ，需加 -SystemTz 临时切系统时区")
     }
 }
 Line
 
-# ---------- 4. 语言/locale 一致性 ----------
-Write-Host "4) 语言 / locale 一致性" -ForegroundColor Cyan
+# ---------- 5. 语言/locale 一致性 ----------
+Write-Host "5) 语言 / locale 一致性" -ForegroundColor Cyan
 $sysLang = (Get-Culture).Name
 Info ("系统区域    : {0}" -f $sysLang)
 if ($ipapi -and $ipapi.countryCode) {
     if ($sysLang -match 'CN' -and $ipapi.countryCode -ne 'CN') {
         Warn ("浏览器默认语言可能是中文，而出口在 {0} —— 次级指纹信号" -f $ipapi.country)
-        Info "修复：用 browse-vpn.ps1 以 --lang 覆盖浏览器语言（不改系统）。"
+        Info "修复：用 browse-vpn.ps1 以 --lang 覆盖浏览器语言；桌面应用/CLI 用 app-vpn.ps1 注入 LANG（均不改系统）。"
     } else {
         Ok "无明显 locale 矛盾"
     }
 }
 Line
 
-# ---------- 5. DNS 解析路径 ----------
-Write-Host "5) DNS 解析路径（是否漏到本地 ISP）" -ForegroundColor Cyan
+# ---------- 6. DNS 解析路径 ----------
+Write-Host "6) DNS 解析路径（是否漏到本地 ISP）" -ForegroundColor Cyan
 $dns = Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.ServerAddresses.Count -gt 0 }
 foreach ($d in $dns) {
     $servers = $d.ServerAddresses -join ', '
@@ -200,9 +258,10 @@ if (-not $NoDnsLeak) {
 }
 Line
 
-# ---------- 6. WebRTC 泄露（主动检测，需真实浏览器）----------
-Write-Host "6) WebRTC 泄露面（主动检测）" -ForegroundColor Cyan
+# ---------- 7. WebRTC 泄露（主动检测，需真实浏览器）----------
+Write-Host "7) WebRTC 泄露面（主动检测 · 仅浏览器）" -ForegroundColor Cyan
 Info "WebRTC 是浏览器 API，需在真实浏览器里发 STUN 才能实测，命令行只读检查覆盖不到。"
+Info "本项只关乎浏览器（含 Electron 内嵌页面）；纯 CLI 工具不用 WebRTC，不受影响。"
 $rtcPage = Join-Path $PSScriptRoot "webrtc-leak-test.html"
 if (Test-Path $rtcPage) {
     $Chrome = @(
@@ -219,8 +278,8 @@ if (Test-Path $rtcPage) {
 }
 Line
 
-# ---------- 7. 链路质量（够不够用；与泄露无关）----------
-Write-Host "7) 链路质量（够不够用 · 与泄露无关）" -ForegroundColor Cyan
+# ---------- 8. 链路质量（够不够用；与泄露无关）----------
+Write-Host "8) 链路质量（够不够用 · 与泄露无关）" -ForegroundColor Cyan
 Info "ping 在这里没有意义：fake-ip 下所有域名都解析到 198.18.x.x、ICMP 由本机应答，"
 Info "节点挂了 ping 也照样秒通。只能实测走代理的 TLS 握手与实际吞吐。"
 if ($NoSpeedTest) {

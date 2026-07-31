@@ -23,12 +23,13 @@ jobs:
         run: |
           bash -n vpn-leak-audit.sh
           bash -n browse-vpn.sh
+          bash -n app-vpn.sh
           bash -n verify-unix.sh
 
       - name: ShellCheck 静态分析
         run: |
           if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck -S warning vpn-leak-audit.sh browse-vpn.sh verify-unix.sh
+            shellcheck -S warning vpn-leak-audit.sh browse-vpn.sh app-vpn.sh verify-unix.sh
           else
             echo "shellcheck 不可用，跳过（非本平台预装）"
           fi
@@ -82,6 +83,45 @@ jobs:
             echo "✅ PASS：$(uname) 上链路质量实测代码路径正常（判定或优雅跳过均可）"
           else
             echo "❌ FAIL：链路质量实测未产出任何结构化结果"; exit 1
+          fi
+
+      - name: 桌面应用/CLI 出口检查冒烟（自查第 2 项）
+        shell: bash
+        run: |
+          # 第 2 项用 curl --noproxy '*' 模拟「不认系统代理的程序」，与第 1 项的出口比对。
+          # runner 上两者必然相同（无代理），断言它给出一致判定即可证明该代码路径可跑通。
+          export LC_ALL=C
+          grep -aE '桌面应用 / CLI 出口|与浏览器一致|正在泄露|代理环境变量' audit.out || true
+          if grep -aqE '与浏览器一致|正在泄露|无从对比' audit.out; then
+            echo "✅ PASS：$(uname) 上桌面应用出口检查产出了判定"
+          else
+            echo "❌ FAIL：第 2 项未产出任何判定"; exit 1
+          fi
+
+      - name: app-vpn 决策（--dry-run，不启动程序）
+        shell: bash
+        run: |
+          out=$(bash ./app-vpn.sh node --dry-run)
+          echo "$out"
+          echo "$out" | grep -q '将注入' || { echo "未产出时区/语言/代理决策"; exit 1; }
+
+      - name: 核心卖点验证 —— app-vpn 是否真把 TZ 注入了子进程
+        shell: bash
+        run: |
+          set -e
+          command -v node >/dev/null || { echo "runner 无 node，跳过"; exit 0; }
+          # 不硬编码期望时区（runner 出口国不定）：先读脚本自己宣称要注入的 TZ，
+          # 再断言子进程 node 实际报告的时区与之相等 —— 与 runner 所在地无关，完全确定。
+          want=$(bash ./app-vpn.sh node --dry-run | grep -aoE 'TZ=[A-Za-z/_]+' | head -1 | cut -d= -f2)
+          echo "脚本宣称将注入 TZ=$want"
+          [ -n "$want" ] || { echo "未能从 --dry-run 读到 TZ"; exit 1; }
+          got=$(bash ./app-vpn.sh node -- -e 'process.stdout.write("TZPROBE:"+Intl.DateTimeFormat().resolvedOptions().timeZone)' \
+                | grep -aoE 'TZPROBE:[A-Za-z/_]+' | head -1 | cut -d: -f2)
+          echo "子进程实际报告 TZ=$got"
+          if [ "$want" = "$got" ]; then
+            echo "✅ PASS：$(uname) 上 app-vpn.sh 的进程级 TZ 注入成立"
+          else
+            echo "❌ FAIL：注入的 TZ 未到达子进程（want=$want got=$got）"; exit 1
           fi
 
       - name: browse-vpn 决策（--dry-run，强制 US 保证确定性）
