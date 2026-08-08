@@ -154,6 +154,7 @@ powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Country US  # 强制�
 powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Proxy http://127.0.0.1:10809
     # 客户端只开本地端口（未开系统代理/TUN）时，让 Chrome 直接走该端口（v2rayN 默认 HTTP 10809）
 powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -WebRTC   # 附带打开 WebRTC 泄露主动检测页
+powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -LockOnly # 只回写语言/locale 偏好，不切时区/不开浏览器
 ```
 ```bash
 # macOS / Linux
@@ -162,7 +163,16 @@ powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -WebRTC   # 附带打�
 ./browse-vpn.sh US           # 强制某国（离线兜底 / 固定语言）
 ./browse-vpn.sh --proxy=socks5://127.0.0.1:1080   # 仅本地端口场景：探测和 Chrome 都走它
 ./browse-vpn.sh --webrtc     # 附带打开 WebRTC 泄露主动检测页
+./browse-vpn.sh --lock-only  # 只回写语言/locale 偏好，不开浏览器
 ```
+
+> **检测页仍报浏览器语言 zh-CN / Intl locale zh-CN？** 这是 v1.0 的已知坑：`--lang` /
+> `--accept-lang` 只在**首次创建配置**时生效，真正决定指纹的 `intl.accept_languages`
+> （`navigator.languages` / Accept-Language 头）和 Local State 的 `intl.app_locale`
+> （`navigator.language` / Intl locale）存在磁盘上，配置一旦在中文环境建过就永久残留。
+> **v1.1 起每次启动都会回写这三个键**——升级到本版后正常重跑一次即可清除，无需手删配置目录；
+> 也可用 `-LockOnly` / `--lock-only` 只回写不启动浏览器。
+> （若回写时该配置的 Chrome 窗口还开着，脚本会拒绝执行——它退出时会用内存里的旧偏好覆盖磁盘。）
 
 > 脚本启动前会自查流量接管方式：既没有 TUN / 系统代理、又没给 `--proxy` 时会**红字警告**
 > ——那种情况下 Chrome 会直连暴露真实 IP。v2ray 系用户没开系统代理时请带上 `--proxy`。
@@ -262,7 +272,7 @@ macOS / Linux 直接传国家码即可（`./browse-vpn.sh jp`），无需单独�
 | 时区（桌面/CLI） | Node/Rust/Go 类程序**认 `TZ`**，`app-vpn` 直接进程级注入；Electron GUI 不认，需显式 `-SystemTz` 临时切系统时区 | 一律进程级注入 `TZ`（Chromium 在 Unix 上也认），系统时区从头到尾不动 |
 | 代理（桌面/CLI） | `app-vpn` 注入 `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY`（大小写各一套），地址取自 `-Proxy` 或系统代理注册表 | 同左，地址取自 `--proxy` 或 macOS `scutil --proxy` / Linux 现有环境变量 |
 | 桌面应用泄露实测 | `curl --noproxy '*'` 复刻"完全不认代理的程序"取出口，与浏览器侧（走系统代理的 .NET）出口比对，不一致即判泄露 | 同左（macOS/Linux 的 curl 同样不读系统代理设置，逻辑一致） |
-| 语言 | Chrome `--lang` / `--accept-lang` + 独立配置的 `intl.selected_languages`，不改系统区域；桌面/CLI 由 `app-vpn` 注入 `LANG` / `LC_ALL` | 同左 |
+| 语言 | Chrome `--lang` / `--accept-lang` + **每次启动回写**独立配置的 `intl.accept_languages` / `intl.selected_languages` 与 Local State 的 `intl.app_locale`（旧配置残留的中文指纹会被强制覆盖），不改系统区域；桌面/CLI 由 `app-vpn` 注入 `LANG` / `LC_ALL` | 同左 |
 | DNS（静态） | 独立 Chrome 配置里关闭"安全 DNS(DoH)"，强制走系统 DNS（TUN 模式=fake-ip 隧道；系统代理模式下域名由代理远端解析），避免浏览器自行解析泄露 | 同左 |
 | DNS（主动实测） | 对随机子域发起真实连接触发递归解析，用 bash.ws 回查实际应答的解析器归属国/ASN，与出口国比对判定泄露 | 同左（curl 触发，逻辑一致） |
 | IP | 由 TUN / 系统代理 / `--proxy` 接管，脚本审查接管方式 | 同左 |
@@ -275,6 +285,8 @@ macOS / Linux 直接传国家码即可（`./browse-vpn.sh jp`），无需单独�
 
 ## 局限 / Caveats
 
+- **检测页把 UTC+8 本身标为「更像中国用户」**：新加坡 / 马来西亚等节点本就在 +8 时区，与出口 IP 完全一致，不算泄露；这是检测页对「与中国相同偏移」的笼统提示。脚本已把时区名和语言对齐到出口国，要彻底规避这条提示只能换非 +8 时区的节点。
+- **机房 IP（IDC/hosting 标记）与风险评分取决于节点质量**：自查第 1 项会提示 proxy/hosting 标记，但脚本无法改变 IP 属性——高风控平台（Claude 等）对机房段敏感，需换住宅 IP（原生 IP）节点才能解决。
 - 只解决"**技术信号别露馅**"。账号自身的行为特征（登录历史、支付地区、填写地址）不在此列，需你自己保持一致。
 - **仅 Windows**：切换系统时区会让**所有程序**的显示时钟随出口国走；会话期间若有按本地时间触发的定时任务会顺移，属正常，浏览器关闭后自动还原。macOS / Linux 版不改系统时区，无此影响。（`app-vpn.ps1` 只在你显式加 `-SystemTz` 时才会切系统时区，CLI 场景默认不切。）
 - **`app-vpn` 靠环境变量约定生效，不是强制拦截**：它注入 `HTTPS_PROXY` 等变量，前提是目标程序愿意读。绝大多数 Node / Rust / Go / Python 生态的工具都读，但**硬编码直连、或自带网络栈完全忽略这些变量的程序它管不住**。要对任意程序都强制生效，只有 TUN 模式（内核层接管）。自查第 2 项测的正是"完全不读代理设置的程序"这一最坏情况——它报绿，才说明 TUN 真的兜住了。

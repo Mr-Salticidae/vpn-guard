@@ -188,8 +188,19 @@ powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Proxy http://127.0.0.
 ./browse-vpn.sh US                               # force a country preset
 ./browse-vpn.sh --proxy=socks5://127.0.0.1:1080  # local-port-only setups: probe and Chrome both use it
 ./browse-vpn.sh --webrtc                         # also open the WebRTC leak test page
+./browse-vpn.sh --lock-only                      # rewrite language/locale prefs only, don't launch
 ```
-(`browse-vpn.ps1 -WebRTC` on Windows does the same.)
+(`browse-vpn.ps1 -WebRTC` / `-LockOnly` on Windows do the same.)
+
+> **Leak checkers still report browser language `zh-CN` / Intl locale `zh-CN`?** That was a
+> known v1.0 pitfall: `--lang` / `--accept-lang` only apply when a profile is **first created**.
+> The settings that actually decide the fingerprint — `intl.accept_languages`
+> (`navigator.languages` / the `Accept-Language` header) and `intl.app_locale` in `Local State`
+> (`navigator.language` / Intl locale) — live on disk, so a profile once created under a Chinese
+> system keeps the residue forever. **Since v1.1 every launch rewrites these keys** — just upgrade
+> and run once to purge them; no need to delete the profile. `-LockOnly` / `--lock-only` rewrites
+> without launching the browser. (If a Chrome window using that profile is still open, the script
+> refuses — Chrome would overwrite the fix with its in-memory old prefs on exit.)
 
 > Before launching, the script checks the takeover mode: with no TUN, no system proxy and
 > no `--proxy`, it **warns in red** — in that state Chrome would connect directly and expose
@@ -308,7 +319,7 @@ in `browse-vpn.sh`.
 | Timezone (desktop/CLI) | Node / Rust / Go programs **do honor `TZ`**, so `app-vpn` injects it per-process; Electron GUIs don't, hence the explicit `-SystemTz` | always process-scoped `TZ` (Chromium honors it on Unix too); system timezone never touched |
 | Proxy (desktop/CLI) | `app-vpn` injects `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` (both cases); address from `-Proxy` or the system-proxy registry key | same, address from `--proxy` or macOS `scutil --proxy` / existing Linux env vars |
 | Desktop-app leak test | `curl --noproxy '*'` replays a "completely proxy-unaware program" and its exit IP is compared against the browser-side one (.NET, which does use the system proxy); a mismatch is a leak | same (curl doesn't read system proxy settings on macOS/Linux either, so the logic is identical) |
-| Language | Chrome `--lang` / `--accept-lang` + `intl.selected_languages` in the isolated profile; system locale untouched. Desktop/CLI get `LANG` / `LC_ALL` from `app-vpn` | same |
+| Language | Chrome `--lang` / `--accept-lang` + **rewritten on every launch**: `intl.accept_languages` / `intl.selected_languages` in the profile and `intl.app_locale` in `Local State` (Chinese residue from older profiles is force-overwritten); system locale untouched. Desktop/CLI get `LANG` / `LC_ALL` from `app-vpn` | same |
 | DNS (static) | "Secure DNS (DoH)" disabled in the isolated Chrome profile, forcing system DNS (TUN mode = fake-ip tunnel; in system-proxy mode hostnames are resolved remotely by the proxy), so the browser can't leak its own lookups | same |
 | DNS (active test) | Triggers real connections to random subdomains to force recursive resolution, then uses bash.ws to look up which resolvers actually answered (country/ASN) and compares to the exit country | same (curl-triggered, identical logic) |
 | IP | Taken over by TUN / system proxy / `--proxy`; the toolkit audits the takeover mode | same |
@@ -321,6 +332,14 @@ in `browse-vpn.sh`.
 
 ## Caveats
 
+- **Checkers flagging UTC+8 itself as "looks like a China user"**: Singapore / Malaysia nodes
+  genuinely sit in UTC+8 — matching the exit IP exactly, so it is not a leak; it is a generic
+  warning about sharing China's offset. Timezone name and language are already aligned to the
+  exit country; the only way to dodge the hint is a node outside the +8 zone.
+- **Datacenter IPs (IDC/hosting flag) and risk scores depend on node quality**: audit check #1
+  surfaces the proxy/hosting flag, but no script can change an IP's attributes — platforms with
+  strict risk control (e.g. Claude) are sensitive to datacenter ranges; switch to a residential
+  ("native") IP node to fix that.
 - This only fixes *technical* signals. Account-level behavior (login history, payment
   region, shipping addresses) is not covered — keep those consistent yourself.
 - **Windows only**: switching the system timezone makes **every program's** clock follow the

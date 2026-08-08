@@ -146,6 +146,30 @@ jobs:
           echo "$out"
           echo "$out" | grep -q '将使用' || { echo "未产出时区/语言决策"; exit 1; }
 
+      - name: 语言/locale 回写回归（残留中文指纹的旧配置 → 回写为出口国语言）
+        shell: bash
+        run: |
+          set -e
+          # 构造一个在中文环境建过的旧配置（v1.0 时代只写 selected_languages，中文指纹残留）
+          rm -rf chrome-us-profile
+          mkdir -p chrome-us-profile/Default
+          printf '{\n   "intl": {\n      "accept_languages": "zh-CN,zh,en",\n      "selected_languages": "zh-CN,zh,en"\n   },\n   "dns_over_https": {\n      "mode": "automatic"\n   }\n}\n' \
+            > chrome-us-profile/Default/Preferences
+          printf '{\n   "intl": {\n      "app_locale": "zh-CN"\n   }\n}\n' \
+            > "chrome-us-profile/Local State"
+          bash ./browse-vpn.sh US --lock-only
+          grep -q '"accept_languages": "en-US,en"' chrome-us-profile/Default/Preferences \
+            || { echo "accept_languages 未被回写"; cat chrome-us-profile/Default/Preferences; exit 1; }
+          grep -q '"app_locale": "en-US"' "chrome-us-profile/Local State" \
+            || { echo "app_locale 未被回写"; cat "chrome-us-profile/Local State"; exit 1; }
+          grep -q '"mode": "off"' chrome-us-profile/Default/Preferences \
+            || { echo "DoH 未被关闭"; exit 1; }
+          if grep -q 'zh-CN' chrome-us-profile/Default/Preferences "chrome-us-profile/Local State"; then
+            echo "仍有 zh-CN 残留"; exit 1
+          fi
+          rm -rf chrome-us-profile
+          echo "✅ PASS：$(uname) 上旧中文配置已被回写为出口国语言（accept_languages / app_locale / DoH）"
+
       - name: verify-unix.sh 汇总（信息性）
         run: bash ./verify-unix.sh
 

@@ -1,8 +1,9 @@
 ﻿<#
-  browse-vpn.ps1  —  通用一致性浏览会话（自动识别出口国）   (vpn-guard v1.0.1)
+  browse-vpn.ps1  —  通用一致性浏览会话（自动识别出口国）   (vpn-guard v1.1.0)
   作用：探测当前 VPN 出口所在国 → 自动把系统时区切到与出口匹配的时区、
-        用独立 Chrome 配置启动（语言匹配出口国、关闭浏览器 DoH 走隧道解析）→
-        你关闭该 Chrome 窗口后，自动还原系统时区。一个脚本适配所有出口国。
+        用独立 Chrome 配置启动（每次启动回写语言/locale 偏好匹配出口国、
+        关闭浏览器 DoH 走隧道解析）→ 你关闭该 Chrome 窗口后，自动还原系统时区。
+        一个脚本适配所有出口国。
 
   用法：
     powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1            # 自动识别当前出口
@@ -10,12 +11,15 @@
     powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Country US # 强制按某国预设（不依赖探测）
     powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Proxy socks5://127.0.0.1:10808
         # 客户端只开了本地端口（如 v2rayN 默认 10808）而没开系统代理/TUN 时，让 Chrome 直接走该端口
+    powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -LockOnly
+        # 只回写语言/locale 偏好（修复旧配置残留的中文指纹），不切时区、不启动浏览器
 #>
 
 param(
     [string]$Country = "",   # 留空=自动探测；或 JP/US/SG/HK/TW/KR/GB/DE/FR/NL/CA/AU
     [string]$Proxy   = "",   # 传给 Chrome --proxy-server，如 socks5://127.0.0.1:10808
     [switch]$WebRTC,         # 附带打开 WebRTC 泄露主动检测页
+    [switch]$LockOnly,       # 只回写语言/locale 偏好，不切时区、不启动浏览器（修复旧配置用）
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -132,6 +136,10 @@ $chosenOffset = ([System.TimeZoneInfo]::FindSystemTimeZoneById($winTz)).GetUtcOf
 if ($ipOffset -ne $null -and [math]::Abs($chosenOffset - $ipOffset) -ge 1) {
     Write-Host ("  ⚠ 所选时区偏移(UTC{0:+0;-0}) 与出口(UTC{1:+0;-0}) 不一致，可能夏令时边界，请人工确认。" -f ($chosenOffset/3600),($ipOffset/3600)) -ForegroundColor Yellow
 }
+# UTC+8 与中国大陆重叠，部分检测页会把该偏移本身标为「更像中国用户」——节点固有属性
+if ($chosenOffset -eq 28800 -and $cc -ne 'CN') {
+    Write-Host ("  提示：UTC+8 与中国大陆相同，部分检测页会因此把环境标记为「更像中国用户」。时区/语言已对齐到 {0}，若目标平台仍敏感，只能换非 +8 时区的节点。" -f $cc) -ForegroundColor DarkYellow
+}
 
 Write-Host ""
 Write-Host ("将使用  时区: {0} (UTC{1:+0;-0}:00)   语言: {2}   出口国: {3}" -f $winTz,($chosenOffset/3600),$lang,$cc) -ForegroundColor Cyan
@@ -140,15 +148,79 @@ $profileDir = Join-Path $BaseDir ("chrome-{0}-profile" -f $cc.ToLower())
 
 if ($DryRun) { Write-Host "[DryRun] 仅预览，未切换时区、未启动浏览器。" -ForegroundColor Magenta; exit 0 }
 
-# ---- 4) 预置独立配置：关闭安全 DNS(DoH) + 默认语言（仅本会话专用配置）----
-$prefDir = Join-Path $profileDir "Default"
-$prefFile = Join-Path $prefDir "Preferences"
-if (-not (Test-Path $prefFile)) {
-    New-Item -ItemType Directory -Force -Path $prefDir | Out-Null
-    (@{ dns_over_https=@{mode='off'}; intl=@{selected_languages=$lang}; browser=@{check_default_browser=$false} } | ConvertTo-Json -Depth 5) |
-        Set-Content -Path $prefFile -Encoding UTF8
-    Write-Host "已为专用配置关闭浏览器 DoH（DNS 交由 VPN 隧道解析）" -ForegroundColor DarkCyan
+# ---- 4) 锁定语言/locale：每次启动都回写，清除旧配置残留的中文指纹 ----
+# 为什么必须回写：--lang / --accept-lang 只在「首次创建配置」时写入偏好；
+# 之后 Chrome 以磁盘上已存的偏好为准 —— Local State 的 intl.app_locale 决定
+# navigator.language / Intl locale，Preferences 的 intl.accept_languages 决定
+# navigator.languages / Accept-Language 请求头。配置一旦在中文环境建过
+# （或被旧版本脚本建过），只传命令行参数盖不掉，检测页会读到 zh-CN。
+$prefDir    = Join-Path $profileDir "Default"
+$prefFile   = Join-Path $prefDir "Preferences"
+$localState = Join-Path $profileDir "Local State"
+$uiLang     = $lang.Split(',')[0]
+
+# 若该配置正被 Chrome 占用，它退出时会用内存里的旧偏好覆写磁盘，回写就白费了
+$busy = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -match [regex]::Escape($profileDir) }
+if ($busy) {
+    Write-Host ("检测到已有 Chrome 正在使用该配置目录（PID: {0}）。" -f ($busy.ProcessId -join ', ')) -ForegroundColor Red
+    Write-Host "请先关闭那个窗口再运行本脚本 —— 否则它退出时会用旧的（中文）偏好覆盖回写。" -ForegroundColor Yellow
+    exit 1
 }
+
+function Set-JsonPath([pscustomobject]$Obj, [string]$Path, $Value) {
+    $node = $Obj
+    $parts = $Path.Split('.')
+    for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+        $prop = $node.PSObject.Properties[$parts[$i]]
+        if ($null -eq $prop -or $prop.Value -isnot [pscustomobject]) {
+            $node | Add-Member -NotePropertyName $parts[$i] -NotePropertyValue ([pscustomobject]@{}) -Force
+        }
+        $node = $node.PSObject.Properties[$parts[$i]].Value
+    }
+    $node | Add-Member -NotePropertyName $parts[-1] -NotePropertyValue $Value -Force
+}
+
+function Write-JsonNoBom([string]$File, $Obj) {
+    # Chrome 偏好文件不容忍 UTF-8 BOM，必须无 BOM 写入
+    [System.IO.File]::WriteAllText($File, ($Obj | ConvertTo-Json -Depth 32), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Patch-ChromePrefs([string]$File, [hashtable]$Values) {
+    if (Test-Path $File) {
+        $obj = $null
+        try { $obj = Get-Content $File -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+        if ($null -ne $obj) {
+            foreach ($k in $Values.Keys) { Set-JsonPath $obj $k $Values[$k] }
+            Write-JsonNoBom $File $obj
+            return
+        }
+        # 解析失败（文件损坏等）：正则兜底只改已存在的键，缺键交给 Chrome 自愈
+        $raw = [System.IO.File]::ReadAllText($File)
+        foreach ($k in $Values.Keys) {
+            $leaf = $k.Split('.')[-1]
+            $raw = [regex]::Replace($raw, '"' + [regex]::Escape($leaf) + '"\s*:\s*"[^"]*"', '"' + $leaf + '":"' + $Values[$k] + '"')
+        }
+        [System.IO.File]::WriteAllText($File, $raw, (New-Object System.Text.UTF8Encoding($false)))
+        return
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path $File) | Out-Null
+    $obj = [pscustomobject]@{}
+    foreach ($k in $Values.Keys) { Set-JsonPath $obj $k $Values[$k] }
+    Write-JsonNoBom $File $obj
+}
+
+Patch-ChromePrefs $prefFile @{
+    'intl.accept_languages'   = $lang   # navigator.languages / Accept-Language 请求头
+    'intl.selected_languages' = $lang
+    'dns_over_https.mode'     = 'off'   # 关闭浏览器 DoH，DNS 交由 VPN 隧道解析
+}
+Patch-ChromePrefs $localState @{
+    'intl.app_locale'         = $uiLang # navigator.language / Intl locale
+}
+Write-Host "已锁定浏览器语言/locale：$lang（每次启动回写，覆盖旧配置的中文残留）；已关闭浏览器 DoH" -ForegroundColor DarkCyan
+
+if ($LockOnly) { Write-Host "[LockOnly] 偏好已回写，未切时区、未启动浏览器。" -ForegroundColor Magenta; exit 0 }
 
 # ---- 5) 切时区 → 启动 → 关闭后还原 ----
 $origTZ = (tzutil /g)

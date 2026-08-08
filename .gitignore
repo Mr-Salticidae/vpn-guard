@@ -4,3 +4,6 @@ chrome-*-profile/
 # 临时/日志
 *.log
 *.tmp
+
+# AI 助手工作区数据
+.workbuddy/
