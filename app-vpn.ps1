@@ -111,7 +111,8 @@ $ianaToWin = @{
 # ==== 内置应用别名 ====
 # gui=$true 的是 Electron/Chromium 系（不认 TZ，需 -SystemTz 才能对齐时区）。
 $appAliases = @(
-    @{ Names=@('codex');                    Label='Codex CLI';        Gui=$false; Cmd='codex' }
+    @{ Names=@('codex');                    Label='Codex CLI';        Gui=$false; Cmd='codex'
+       Paths=@('%LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe') }
     @{ Names=@('claude','claude-code','cc');Label='Claude Code CLI';  Gui=$false; Cmd='claude' }
     @{ Names=@('claude-desktop','claudeapp');Label='Claude 桌面版';   Gui=$true;  Cmd=''
        Paths=@('%LOCALAPPDATA%\AnthropicClaude\claude.exe','%LOCALAPPDATA%\Programs\claude\Claude.exe','%LOCALAPPDATA%\Programs\AnthropicClaude\claude.exe')
@@ -121,7 +122,9 @@ $appAliases = @(
     @{ Names=@('code','vscode');            Label='VS Code';          Gui=$true;  Cmd=''
        Paths=@('%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe','%ProgramFiles%\Microsoft VS Code\Code.exe'); Reg='Visual Studio Code' }
     @{ Names=@('chatgpt');                  Label='ChatGPT 桌面版';   Gui=$true;  Cmd=''
-       Paths=@('%LOCALAPPDATA%\Programs\ChatGPT\ChatGPT.exe'); Reg='ChatGPT' }
+       Paths=@('%LOCALAPPDATA%\Programs\ChatGPT\ChatGPT.exe'); Reg='ChatGPT'
+       AppxAumid='OpenAI.Codex_2p2nqsd0c76g0!App'
+       AppxArgs='--disable-features=NonexistentFeaturePlaceholder' }
 )
 
 if ($List) {
@@ -188,11 +191,22 @@ function Resolve-App([string]$name) {
         foreach ($p in @($a.Paths)) {
             if (-not $p) { continue }
             $ex = [Environment]::ExpandEnvironmentVariables($p)
-            if (Test-Path $ex) { return @{ Path=$ex; Label=$a.Label; Gui=$a.Gui } }
+            if ($ex -match '[*?]') {
+                # 通配符路径（如 bin\*\codex.exe）：取最新匹配
+                $hit = Get-Item $ex -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Desc | Select-Object -First 1
+                if ($hit) { return @{ Path=$hit.FullName; Label=$a.Label; Gui=$a.Gui } }
+            } elseif (Test-Path $ex) {
+                return @{ Path=$ex; Label=$a.Label; Gui=$a.Gui }
+            }
         }
         if ($a.Reg) {
             $found = Find-InstalledApp $a.Reg
             if ($found) { return @{ Path=$found; Label=$a.Label; Gui=$a.Gui } }
+        }
+        if ($a.AppxAumid) {
+            # Appx 应用：直接返回 AUMID，激活时若包不存在会自然报错。
+            # 不用 Get-AppxPackage 预检——该 cmdlet 在非交互式 PowerShell 子进程中可能不可用。
+            return @{ Path=$a.AppxAumid; Label=$a.Label; Gui=$a.Gui; IsAppx=$true; AppxArgs=$a.AppxArgs }
         }
         Bad ("识别出别名「{0}」（{1}），但在本机找不到它的可执行文件。" -f $lower, $a.Label)
         Info "可直接传完整路径，例如：app-vpn.ps1 `"D:\path\to\app.exe`""
@@ -297,6 +311,12 @@ if ($proxyUrl) {
     foreach ($n in 'HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','https_proxy','http_proxy','all_proxy') { $inject[$n] = $proxyUrl }
     $inject['NO_PROXY'] = $noProxy; $inject['no_proxy'] = $noProxy
     Info ("代理环境变量取自：{0}" -f $proxySource)
+} elseif ($tunActive) {
+    # TUN 已全局接管 —— 显式清除继承的代理环境变量，避免双重路由（proxy→TUN）增加延迟。
+    # 实测：代理路径比 TUN 直连慢 0.4-2.3s，SSE 长连接（如 Codex CLI）会因此超时断连。
+    foreach ($n in 'HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','https_proxy','http_proxy','all_proxy') { $inject[$n] = '' }
+    $inject['NO_PROXY'] = '*'; $inject['no_proxy'] = '*'
+    Ok ("TUN 活跃 —— 已清除代理环境变量，目标程序走 TUN 直连（避免双重路由延迟）")
 }
 
 if ($Print) {
@@ -325,7 +345,13 @@ $isGui = if ($null -ne $target.Gui) { $target.Gui } else {
 Write-Host ""
 Write-Host ("目标应用: {0}" -f $target.Label) -ForegroundColor Cyan
 Info ("路径     : {0}" -f $target.Path)
-Info ("类型     : {0}" -f $(if ($isGui) { 'GUI（Chromium/Electron 系不认 TZ）' } else { '控制台（Node/Rust 等认 TZ，进程级生效）' }))
+if ($target.IsAppx) {
+    Info ("类型     : Appx 应用（通过 IApplicationActivationManager 激活，环境变量由当前进程继承）")
+} elseif ($isGui) {
+    Info ("类型     : GUI（Chromium/Electron 系不认 TZ）")
+} else {
+    Info ("类型     : 控制台（Node/Rust 等认 TZ，进程级生效）")
+}
 if ($targetArgs) { Info ("透传参数 : {0}" -f ($targetArgs -join ' ')) }
 
 if ($isGui -and -not $SystemTz) {
@@ -374,7 +400,34 @@ try {
     Write-Host "正在启动……（关闭该程序后环境自动还原）" -ForegroundColor Cyan
     Write-Host ("-" * 60) -ForegroundColor DarkGray
 
-    if ($isGui) {
+    if ($target.IsAppx) {
+        # Appx 应用：WindowsApps 目录受保护，不能用 Start-Process 直接跑 exe，
+        # 须用 IApplicationActivationManager 激活（环境变量由当前进程继承）。
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public enum ActOpts { None = 0 }
+[ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAppActMgr {
+    IntPtr ActivateApplication([In, MarshalAs(UnmanagedType.LPWStr)] string aumid, [In, MarshalAs(UnmanagedType.LPWStr)] string args, [In] ActOpts opts, [Out] out uint pid);
+}
+[ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+public class AppActMgrClass { }
+public static class AppAct {
+    public static uint Launch(string aumid, string args) {
+        var mgr = (IAppActMgr)(object)new AppActMgrClass();
+        uint pid; mgr.ActivateApplication(aumid, args, ActOpts.None, out pid); return pid;
+    }
+}
+"@
+        $appxArgs = $target.AppxArgs
+        if ($targetArgs) { $appxArgs = "$appxArgs $($targetArgs -join ' ')" }
+        if (-not $appxArgs) { $appxArgs = ' ' }   # 空参可能导致某些 Appx 应用崩溃，给个空格
+        $launchedPid = [AppAct]::Launch($target.Path, $appxArgs)
+        Info ("已激活 Appx 应用（PID={0}），等待退出……" -f $launchedPid)
+        $proc = Get-Process -Id $launchedPid -ErrorAction SilentlyContinue
+        if ($proc) { $proc.WaitForExit() }
+    } elseif ($isGui) {
         # GUI 程序：& 不会等待，必须 Start-Process -Wait
         if ($targetArgs) { Start-Process -FilePath $target.Path -ArgumentList $targetArgs -Wait }
         else             { Start-Process -FilePath $target.Path -Wait }
