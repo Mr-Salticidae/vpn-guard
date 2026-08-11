@@ -33,6 +33,7 @@
 | `vpn-leak-audit` 自查 | ✅ 全部 8 项 | ✅ 除第 7 项 WebRTC 外全部适用 | ✅ 除第 7 项 WebRTC 外全部适用 |
 | `browse-vpn` 一致性会话 | ✅ 就是为它做的 | ❌ 管不到 | ❌ 管不到 |
 | `app-vpn` 一致性会话 | —（用 browse-vpn） | ✅ 代理 / 语言；时区见下表 | ✅ 代理 / 时区 / 语言全部生效 |
+| `auto-select-node` 节点筛选 | ✅ 选出安全+快速节点并自动切换 | 同左（切的是全局出口） | 同左 |
 
 **桌面应用有一条浏览器没有的泄露路径**，这也是 `app-vpn` 存在的理由：
 
@@ -263,6 +264,34 @@ macOS / Linux 直接传国家码即可（`./browse-vpn.sh jp`），无需单独�
 **未预置的国家**：探测成功时时区直接用出口 IANA 时区（Unix 天然支持；Windows 按映射表/UTC 偏移匹配），
 语言退回 `en-US` 并提示确认。新增国家只需编辑 `browse-vpn.ps1` 顶部 `$presets` /
 `browse-vpn.sh` 里的 `preset()` 函数。
+
+### 6. `auto-select-node` — 自动节点筛选与调配（Windows）
+
+在安全性前提下自动找到最优代理节点并切换。通过 mihomo named pipe API 通信，渐进式筛选：
+
+1. **延迟预筛**：组内全部节点 → 按延迟排序，保留 Top N
+2. **安全性测试**：逐节点切换 → 查询出口 IP → 淘汰 proxy / 机房标记
+3. **带宽测试**：安全通过的节点 → Cloudflare 测速点测 TLS 握手 + 吞吐
+4. **自动部署**：综合评分（带宽 60% + 延迟 25% + TLS 15%）最高者自动切换
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1                 # 默认: 国外默认组, Top10→Top5
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -DryRun         # 只测不切，结束后还原原节点
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -TopN 15 -TopM 3 # 自定义每轮保留数量
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -Group "国外媒体"
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -AllowHosting   # 允许机房 IP（放宽安全门槛）
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    # 跳过带宽测试，仅按延迟+安全排序
+```
+
+> **安全优先策略**：被标记为 `proxy` 或 `hosting`（机房 IP）的节点直接淘汰，不参与后续评分。
+> 高风控平台（Claude 等）对机房段敏感，住宅 IP 节点才是安全选择。
+> 用 `-AllowProxy` / `-AllowHosting` 可放宽门槛，但需自行承担风险。
+>
+> **前提**：Clash Verge Rev (mihomo) 正在运行，TUN 模式已开启。
+> 脚本通过 `\\.\pipe\verge-mihomo` named pipe 与 mihomo 通信，不依赖 TCP 外部控制器端口。
+>
+> **别用客户端面板的延迟数字挑节点**——那只测一次握手往返，不反映带宽，也不检查 IP 信誉。
+> 本脚本的安全检测（proxy/hosting 标记）是面板里完全没有的维度。
 
 ## 工作原理 / How it works
 
