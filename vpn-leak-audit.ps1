@@ -170,6 +170,7 @@ if ($ipapi -and $ipapi.status -eq 'success') {
     Info ("ISP       : {0}" -f $ipapi.isp)
     Info ("IP 时区   : {0} (UTC{1:+0;-0}:00)" -f $ipapi.timezone, ($ipapi.offset/3600))
     if ($ipapi.proxy)   { Warn "该 IP 被标记为 proxy —— 部分平台会据此拦截" } else { Ok "未被标记为 proxy" }
+    # EXIT-CLASS-BEGIN  （verify-classifier.sh 按此标记抽取本块做跨语言比对，别删）
     # ---- 出口归属（住宅/消费级 vs 机房/主机商）----
     # 旧版仅凭 ip-api 的 hosting=false 就写「读起来像住宅/普通 ISP」，2026-08-19 实测是错的：
     # AS131939 IPS INC / AS131642 Pittqiao / AS209642 Mejiro 三家小主机商 hosting 全是 false。
@@ -195,6 +196,7 @@ if ($ipapi -and $ipapi.status -eq 'success') {
         Info ("出口归属  : 未识别 —— AS{0} 既不在消费级运营商名单中，ip-api 也未标记为机房。" -f $exitAsnNum)
         Info "「未识别」只表示没认出来：既不等于机房，也不等于住宅。别据此判定安全。"
     }
+    # EXIT-CLASS-END
 } else {
     Bad "无法获取公网 IP（ip-api 不可达）——检查 VPN 是否在线"
 }

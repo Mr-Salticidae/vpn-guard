@@ -233,6 +233,7 @@ if [ "$ip_status" = "success" ]; then
     info "ISP       : $ip_isp"
     info "IP 时区   : $ip_tz ($(fmt_utc "$ip_offset"))"
     if [ "$ip_proxy" = "true" ];   then warn "该 IP 被标记为 proxy —— 部分平台会据此拦截"; else ok "未被标记为 proxy"; fi
+    # EXIT-CLASS-BEGIN  （verify-classifier.sh 按此标记抽取本块做跨语言比对，别删）
     # ---- 出口归属（住宅/消费级 vs 机房/主机商）----
     # 旧版仅凭 ip-api 的 hosting=false 就写「读起来像住宅/普通 ISP」，2026-08-19 实测是错的：
     # AS131939 IPS INC / AS131642 Pittqiao / AS209642 Mejiro 三家小主机商 hosting 全是 false。
@@ -261,6 +262,7 @@ if [ "$ip_status" = "success" ]; then
         info "出口归属  : 未识别 —— AS${exit_asnum} 既不在消费级运营商名单中，ip-api 也未标记为机房。"
         info "「未识别」只表示没认出来：既不等于机房，也不等于住宅。别据此判定安全。"
     fi
+    # EXIT-CLASS-END
 else
     bad "无法获取公网 IP（ip-api 不可达）——检查 VPN 是否在线"
 fi

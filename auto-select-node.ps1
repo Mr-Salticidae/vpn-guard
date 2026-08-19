@@ -307,9 +307,13 @@ $script:ApacCc = @('JP','TW','HK','SG','KR','IN','CN','MO','TH','MY','VN','PH','
 $script:RipeOctets = @(@(62,62),@(77,95),@(176,176),@(178,178),@(185,185),
                        @(188,188),@(193,195),@(212,213),@(217,217))
 
-# 机房 / 主机商词表。刻意不含裸词 "data" —— 中华电信的 AS 名就是
-# "Data Communication Business Group"，裸 data 会直接误杀唯一一个真住宅节点。
-# 往这张表里加词之前，先拿四个真实样本跑一遍回归。
+# 机房 / 主机商词表。刻意不含裸词 "data"。
+# 起因是中华电信的 AS 机构名就叫 "Data Communication Business Group" —— 但它本身不会因此
+# 被误杀：AS3462 在名单里，第 1 步就短路返回了，根本走不到词表；就算走到，同一串里的
+# "Communication" 也会命中运营商词表把分数抵消回去。
+# 真正的风险是更广的一类：持 16 位号段、不在名单里、名字带 data 却不含任何运营商词的
+# 正规运营商（"Datacom" 之类），加了裸 data 就会被凭空判成机房。
+# 往这张表里加词之前，跑 verify-classifier.sh —— 它有一条专门守这个的哨兵。
 $script:RxHosting = '(?i)hosting|\bhosts?\b|datacent|data\s*cent(er|re)|colocat|\bcolo\b|\bidc\b|\bcloud|\bservers?\b|\bdedicated\b|\bvps\b|\bvds\b|\bcdn\b|anycast|\btransit\b|carrier[- ]?neutral|bare\s?metal'
 # 运营商词表 —— 全脚本唯一的减分项，用来救持有 32 位 ASN 的新入场正规运营商
 # （乐天移动靠 "Mobile"，Three UK 的机构名 "Hutchison 3G UK Limited" 只能靠 3G 认出来）。
