@@ -96,7 +96,7 @@ jobs:
       - name: 链路质量实测冒烟（Cloudflare 测速点，最佳努力）
         shell: bash
         run: |
-          # 跑带测速的自查，只断言第 7 项产出了可识别结果（握手+吞吐判定，或测速点不可达时优雅跳过）。
+          # 跑带测速的自查，只断言第 8 项产出了可识别结果（握手+吞吐判定，或测速点不可达时优雅跳过）。
           # runner 带宽远好于家用链路，这里不校验具体数值，只验代码路径与判定分支在真机可跑通。
           export LC_ALL=C
           out=$(bash ./vpn-leak-audit.sh --no-dns-leak 2>/dev/null || true)

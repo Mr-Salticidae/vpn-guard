@@ -73,7 +73,8 @@ $ianaToWin = @{
 }
 
 function Get-Exit {
-    $u = "http://ip-api.com/json/?fields=status,country,countryCode,city,timezone,offset,isp,query,proxy,hosting"
+    # as 与其余字段同一次请求，零额外配额；用于识别 ip-api 未收录的小主机商出口。
+    $u = "http://ip-api.com/json/?fields=status,country,countryCode,city,timezone,offset,isp,as,query,proxy,hosting"
     try {
         # -Proxy 为 http(s) 代理时，探测也走它，保证拿到的是真实出口；PS5.1 不支持 SOCKS 探测
         if ($Proxy -match '^https?://') { return Invoke-RestMethod -Uri $u -Proxy $Proxy -TimeoutSec 15 }
@@ -105,7 +106,20 @@ if (-not $exit -or $exit.status -ne 'success') {
 } else {
     Write-Host ("  出口 IP : {0}" -f $exit.query) -ForegroundColor Gray
     Write-Host ("  位置    : {0} / {1} ({2}), {3} (UTC{4:+0;-0}:00)" -f $exit.city,$exit.country,$exit.countryCode,$exit.timezone,($exit.offset/3600)) -ForegroundColor Gray
-    if ($exit.proxy -or $exit.hosting) { Write-Host "  注意：该 IP 被标记为 proxy/hosting，高风控平台可能拦截。" -ForegroundColor Yellow }
+    if ($exit.proxy -or $exit.hosting) {
+        Write-Host "  注意：该 IP 被标记为 proxy/hosting，高风控平台可能拦截。" -ForegroundColor Yellow
+    } else {
+        # hosting=false 只说明 ip-api 库里没这条记录，不等于住宅。16 位 ASN 空间在 2014 年前后
+        # 被各注册局分配殆尽，家宽运营商全都在那之前拿到号段；32 位 ASN（>= 65536）绝大多数
+        # 是之后注册的小主机商。这里只告警，因此不需要 auto-select-node 的那张住宅 ASN 名单 ——
+        # 名单只用于产出「是住宅」这个正面判定，与告警无关。
+        $exitAsn = 0
+        if ("$($exit.as)" -match '^\s*AS(\d+)') { $exitAsn = [long]$Matches[1] }
+        if ($exitAsn -ge 65536) {
+            Write-Host ("  注意：出口 AS{0} 是 32 位 ASN（2014 年后发放），多半是小主机商而非住宅段。" -f $exitAsn) -ForegroundColor Yellow
+            Write-Host "        ip-api 没标记它，不代表它干净。跑 vpn-leak-audit 看完整判定。" -ForegroundColor DarkGray
+        }
+    }
     $cc = $exit.countryCode.ToUpper(); $iana = $exit.timezone; $ipOffset = $exit.offset
     if ($Country -ne "" -and $Country.ToUpper() -ne $cc) {
         Write-Host ("  你指定了 -Country {0}，但探测到出口在 {1}；以你指定的为准。" -f $Country.ToUpper(),$cc) -ForegroundColor Yellow

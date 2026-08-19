@@ -7,12 +7,14 @@
 [![verify](https://github.com/Mr-Salticidae/vpn-guard/actions/workflows/verify.yml/badge.svg)](https://github.com/Mr-Salticidae/vpn-guard/actions/workflows/verify.yml)
 [![version](https://img.shields.io/github/v/tag/Mr-Salticidae/vpn-guard?label=version)](https://github.com/Mr-Salticidae/vpn-guard/releases)
 (every push runs on real cloud macOS + Linux: syntax / shellcheck / leak audit / real-Chrome `TZ` /
-`app-vpn` process-scoped `TZ` injection verification)
+`app-vpn` process-scoped `TZ` injection verification / **exit-provenance classifier regression**
+— a hard gate that diffs `.ps1` against `.sh` output byte for byte)
 
 > A cross-platform toolkit (PowerShell for **Windows**, Bash for **macOS / Linux**) to
 > **audit VPN leaks** (IP / DNS / WebRTC / IPv6) and keep your browser fingerprint
-> (timezone / locale) **consistent with the exit-node country**, so geo-fingerprinting
-> doesn't flag "this user is on a VPN".
+> (timezone / locale) **consistent with the exit-node country**, so your fingerprint stops
+> contradicting your exit IP. (It does not stop a platform concluding you are on a VPN — the
+> exit IP itself usually settles that; see the framing section below.)
 >
 > Works with all mainstream proxy clients — **Clash / Mihomo, V2Ray / Xray (v2rayN),
 > sing-box, Shadowsocks, Hysteria, WireGuard, OpenVPN** — by detecting *how* traffic is
@@ -31,6 +33,38 @@ the same country.
 
 ---
 
+## First, the honest framing: this preserves trust you already have — it cannot manufacture it
+
+This is the most commonly misread thing about this repo, so it goes first.
+
+Risk-control systems are almost always **cumulative scoring against a threshold**, not a single
+kill switch. The factors that actually decide your fate, by weight:
+
+| Weight | Factor | This toolkit |
+|:---:|---|---|
+| 1 | **Exit IP tenancy and reputation** — datacenter ranges; association bans when many accounts share one exit | ⚠️ half-covered: the provenance gate identifies datacenter ranges, but **nothing here can measure how many accounts sit behind an IP** |
+| 2 | **Account provenance** — registration IP country, payment method country, account age, self-registered vs. bought/shared | ❌ **completely out of reach** |
+| 3 | **Behavioral pattern** — country hopping (a client's auto-switch group creates impossible travel), one account on many devices, concurrency | ✅ exit-rotation detection |
+| 4 | **Technical fingerprint** — timezone / locale / WebRTC / DNS inconsistency | ✅ `browse-vpn`, `app-vpn` |
+
+**Layer 2 is the one high-weight factor no script can touch**, and it is precisely what explains
+"same proxy, yet some people are never affected while others are banned repeatedly":
+
+Risk control builds a **per-account baseline** for an aged account (what does normal look like *for
+this account*), but can only fall back on a **population prior** for a new one (what are people with
+these traits usually up to). For an account with years of continuous benign history, "logs in from a
+proxy IP" was written into its baseline long ago and is not an anomaly. An account created last week
+to sign up has no baseline to compare against, so it is judged against population priors — and the
+prior for datacenter ranges is dreadful. **Identical exit IP, identical fingerprint, wildly
+different outcome.**
+
+So: installing these scripts will not make a fresh account safe. Their value is **keeping an already
+clean account from bleeding score through technical sloppiness**. If your account keeps getting
+banned and this toolkit doesn't help, the problem is probably in layer 2 — which no script
+can fix.
+
+---
+
 ## Scope — browser? desktop app? CLI?
 
 A common misconception is that this toolkit only covers the browser. Here's the actual split:
@@ -40,6 +74,7 @@ A common misconception is that this toolkit only covers the browser. Here's the 
 | `vpn-leak-audit` | ✅ all 8 checks | ✅ all but #7 (WebRTC) | ✅ all but #7 (WebRTC) |
 | `browse-vpn` session | ✅ built for it | ❌ out of reach | ❌ out of reach |
 | `app-vpn` session | — (use `browse-vpn`) | ✅ proxy / locale; timezone: see below | ✅ proxy / timezone / locale, all of it |
+| `auto-select-node` | ✅ picks a safe + fast node and switches to it | same (it switches the global exit) | same |
 
 **Desktop apps have a leak path the browser doesn't** — which is the whole reason `app-vpn` exists:
 
@@ -113,11 +148,28 @@ powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoSpeedTest  # sk
 
 Reports with red / yellow / green: **detected proxy client and traffic-takeover mode**
 (TUN / system proxy / none — each with its leak surface), public IP + geolocation,
-proxy/hosting flags, **desktop-app / CLI exit consistency**, IPv6 leak surface,
+proxy flag, **exit provenance** (residential/consumer vs datacenter/hosting),
+**desktop-app / CLI exit consistency**, IPv6 leak surface,
 **timezone consistency** (system vs exit IP), locale consistency, DNS resolution path
 (static config + **active DNS-leak test**), a **WebRTC active-detection entry point**, and
 **link quality** (handshake + throughput — is this node fast enough to watch video).
 Re-run after switching nodes or countries.
+
+> **Exit provenance** (check #1): `hosting=false` only means ip-api has no record for that
+> range — it does **not** mean residential. In a real run, three small hosting shops
+> (`IPS INC`, `Pittqiao Network Information`, `Mejiro Network Limited`) all reported
+> `hosting=false`, and the old code told the user "reads like a residential / ordinary ISP" —
+> which was simply wrong. The verdict is now three-state, decided by **ASN allocation era**, and
+> **`unrecognized` is the default**: when the evidence is insufficient it says so, and never
+> claims safety.
+>
+> **Note the two verdicts are not the same criterion**: the audit uses only allocation era plus
+> the shared `residential-asn.txt` list; `auto-select-node` (§6) layers name-based signals on top
+> as a weighted score. **The same exit can therefore get different verdicts from the two tools** —
+> measured examples: a 32-bit ASN whose org name carries a carrier word reads `unrecognized` in
+> the selector but "inferred datacenter" in the audit; a 16-bit ASN whose org name contains
+> `Hosting` goes the other way. All the two share is the ASN list, and `verify-unix.sh` check #11
+> mechanically proves that list has not drifted.
 
 > **Desktop-app / CLI exit test** (check #2): fires a request via `curl --noproxy '*'` to
 > replay what a *completely proxy-unaware program* would do, then compares it against the
@@ -126,6 +178,13 @@ Re-run after switching nodes or countries.
 > system proxy is enabled in the registry and the browser is perfectly fine, while the
 > Node / Electron main process simply never reads it. On a leak verdict it prints both fixes
 > (enable TUN, or launch via `app-vpn`).
+>
+> The same check doubles as **exit-rotation detection**. Under TUN, `--noproxy` only disables
+> *proxy settings* — it does not change *routing* — so both observations still go through the
+> tunnel. If the two IPs differ but share an ASN, the node sits behind a load-balanced pool
+> rather than leaking: that prints a yellow "exit is rotating", not a red leak. This applies
+> **only when the outbound route genuinely goes through the TUN adapter**; under system-proxy
+> / PAC / no takeover, `curl` really is direct, so a differing IP *is* a real leak and stays red.
 
 > **Active DNS-leak test** (on by default): triggers real resolution of random subdomains and
 > checks *which resolvers actually answered* (with country / ASN), comparing them to the exit
@@ -177,6 +236,8 @@ Re-run after switching nodes or countries.
 powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1            # auto-detect exit country
 powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -DryRun    # preview only, change nothing
 powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Country US  # force a country preset
+powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -WebRTC     # open the WebRTC leak test inside the tunnel
+powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -LockOnly  # only write the profile's locale/DoH prefs, don't launch
 powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Proxy http://127.0.0.1:10809
     # client only exposes a local port (no system proxy / TUN)? route Chrome through it
     # (v2rayN's default HTTP port is 10809)
@@ -311,6 +372,129 @@ UTC-offset match on Windows), the language falls back to `en-US` with a confirma
 To add a country, edit `$presets` at the top of `browse-vpn.ps1` / the `preset()` function
 in `browse-vpn.sh`.
 
+### 6. `auto-select-node` — automatic node selection and deployment (Windows)
+
+Finds the best proxy node *subject to security constraints* and switches to it. Talks to
+mihomo over its named-pipe API, filtering progressively:
+
+1. **Latency pre-filter**: every node in the group → sorted by latency, keep Top N
+2. **Security test**: switch to each → probe the exit IP **multiple times** → drop nodes flagged
+   `proxy` / `hosting`, plus **rotating exits** and exits **inferred to be datacenter**
+   (an `unrecognized` verdict never drops a node)
+3. **Bandwidth test**: survivors → TLS handshake + throughput against a Cloudflare endpoint
+4. **Auto-deploy**: switch to the highest composite score (bandwidth 60% + latency 25% + TLS 15%)
+
+> ⚠️ Before v1.1.0 that latency 25% **was silently dead**: `delay` lives in a hashtable key,
+> and `Measure-Object` only sees PSObject properties, so max/min came back `$null` and the term
+> degenerated to a constant — what actually ran was "bandwidth 80% + TLS 20%". Fixed.
+>
+> The latency term now genuinely counts, but **whether that changes the ranking depends on the
+> data**: in a 2026-08-19 run the order flipped (TW-07 at 142 ms fell from 100 to 75, HK-03 at
+> 101 ms rose from 98.2 to 88.3, changing the winner), while the `auto-select-live.txt` run in
+> this repo (2026-08-11) keeps its order and only moves the scores (HK-03 92.8 → 67.7). Both
+> outcomes are normal — the point is that a high-latency node no longer collects those 25 points
+> for free.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .uto-select-node.ps1                    # defaults: group "国外默认", Top10 -> Top5
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -DryRun            # test only; restores the original node
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -TopN 15 -TopM 3   # how many survive each round
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -Group "国外媒体"
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -AllowHosting      # allow datacenter IPs
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -IpProbes 3        # probe each exit 3x (default 2; 1 = off)
+powershell -ExecutionPolicy Bypass -File .uto-select-node.ps1 -AllowRotating     # allow rotating exits
+powershell -ExecutionPolicy Bypass -File .uto-select-node.ps1 -ProbeGapMs 5000    # gap between exit probes (default 2500 ms)
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -AllowDatacenter   # don't drop on exit provenance
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -PreferResidential # rank residential exits first
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest       # skip bandwidth; rank by latency + security
+```
+
+> **Security-first policy**: nodes flagged `proxy` or `hosting` are dropped outright and never
+> reach scoring. High-risk-control platforms (Claude et al.) are sensitive to datacenter ranges;
+> a residential-IP node is the safe choice. `-AllowProxy` / `-AllowHosting` relax the gate at
+> your own risk.
+>
+> **Exit-rotation detection (on by default)**: probes the exit IP twice per node (each `curl`
+> is its own process and its own connection — no pooling), and a mismatch means the node sits
+> behind a **load-balanced / multi-exit pool**, so it is dropped. Such nodes do two kinds of
+> damage and are **indistinguishable from ordinary nodes in the client's UI**:
+>
+> 1. **The exit is shared by many accounts** — platforms cluster by IP, so one bad account
+>    takes the whole cluster down with it;
+> 2. **Your own session drifts across IPs / countries** — straight into impossible-travel checks.
+>
+> Cross-country rotation (the two probes land in different countries) is worse than same-country
+> rotation, and the two are reported separately.
+> **A failed re-probe never drops a node**: a timeout or an ip-api rate limit is treated as
+> "not tested" — better to miss one than to kill a good node by mistake.
+> `-IpProbes 1` turns the check off entirely (restores the old behaviour); `-AllowRotating`
+> detects but does not drop.
+>
+> **Nodes already doomed skip the re-probe**: if a node is out on `proxy` / `hosting`, whether
+> it rotates cannot change the outcome, so the probe is pure waste and is short-circuited.
+> In a real run with `-IpProbes 3`, 6 of the Top 10 were datacenter IPs, cutting probes from 30
+> to 18 (at the default `-IpProbes 2` it is 20 → 14). The side
+> effect is that such a node's drop reason reads "datacenter IP" rather than "rotating" — both
+> are hard drops with identical outcomes, so only the diagnostic label is lost; with
+> `-AllowHosting` those nodes stay in the running and the re-probe runs as usual, losing nothing.
+>
+> **Exit provenance classification (on by default)**: ip-api's `hosting=false` only means "not
+> in its records" — it does **not** mean residential. In a real run, of the 4 nodes that cleared
+> every earlier gate only 1 was a genuine residential range (Chunghwa Telecom); the other three
+> (`IPS INC` / `Pittqiao Network Information` / `Mejiro Network Limited`) were small hosting shops.
+>
+> The criterion is a **structural fact**, not what the name looks like: the 16-bit ASN space
+> (1–65535) was exhausted at every registry around 2014, and running mass-market consumer
+> broadband takes enormous address holdings and years of operating history — so every incumbent
+> carrier holds a low number (Chunghwa AS3462, KT AS4766, SoftBank AS17676, HKT AS4760,
+> Comcast AS7922…). Conversely, 32-bit ASNs (≥ 65536) are overwhelmingly small hosting shops
+> registered after 2014. IPv4 and the 16-bit ASN space are both exhausted, so **this boundary
+> itself cannot move again**.
+> The data comes from the `as` / `asname` fields — **the same single request as before, zero
+> extra quota**.
+>
+> **The classifier is not only that rule**, though — don't let the paragraph above mislead you.
+> It is a weighted score, datacenter declared at a total of 3: allocation era +3 (another +1
+> above AS200000), a hosting word in the org name +3 (**enough on its own**), a European RIPE
+> range landing in APAC +2, an unregistered RIR placeholder AS-NAME +1, a carrier word **−3**.
+> The allocation-era term cannot rot; **the two word lists can** — which is why
+> `verify-classifier.sh` keeps dedicated sentinels for them. Run it before touching either list.
+>
+> **The drop is *relative***: a datacenter node is removed only while the pool still holds a
+> non-datacenter one. If everything classifies as datacenter the gate stands down entirely,
+> drops nothing, and suggests changing providers — **emptying the candidate pool is
+> structurally impossible**. Of the three verdicts, `unrecognized` means *missing information*,
+> not a negative finding, and never contributes to a drop.
+>
+> `-AllowDatacenter` disables the drop (the classification is still printed);
+> `-PreferResidential` ranks residential exits first — it is a **lexicographic tier**, not a
+> score bonus: whenever the surviving pool is a single tier the ordering is identical to not
+> passing it at all; combined with `-AllowDatacenter`, unknown-tier nodes still rank ahead of
+> datacenter ones (which is the intent). If it gets one wrong, add the ASN to `residential-asn.txt` (the script prints
+> `ASN : AS<n> <org>` for every node, so you harvest entries from your own run log) — no need
+> to edit the script.
+>
+> ⚠️ **Sign out of high-risk-control sessions before running this.** It is the operational fact
+> this section's readers most need: steps 2 and 3 switch your **global exit** to each candidate
+> in turn — up to roughly a dozen switches by default (one per Top-10 security test, one per
+> Top-5 bandwidth test, one final deploy or restore), each held for seconds, **including the
+> nodes that are about to be rejected as proxy / datacenter / rotating**. With Claude or ChatGPT
+> open, your session hops across several countries in a few minutes — exactly the layer-3
+> "country hopping / impossible travel" from the framing table at the top of this README.
+> **`-DryRun` switches too**; it merely skips deploying a winner and restores the original node
+> at the end.
+>
+> **Prerequisites**: Clash Verge Rev (mihomo) running with TUN mode on. The script talks to
+> mihomo over the `\\.\pipe\verge-mihomo` named pipe, so it does not need the TCP external
+> controller port.
+>
+> **Don't pick nodes by the latency number in your client's UI** — that measures one handshake
+> round trip, reflects nothing about bandwidth, checks no IP reputation, and cannot tell you
+> whether the node is a load-balanced pool. The lowest-latency node in the panel is usually the
+> one *everybody* is on, which is exactly the one with the highest shared-exit density and
+> association risk. This script's security checks (proxy/hosting flags + exit rotation +
+> provenance) are dimensions the panel does not have at all.
+
 ## How it works
 
 | Signal | Windows | macOS / Linux |
@@ -325,7 +509,7 @@ in `browse-vpn.sh`.
 | IP | Taken over by TUN / system proxy / `--proxy`; the toolkit audits the takeover mode | same |
 | IPv6 | Fetches the public IPv6 and **compares its geolocation to the exit country**: match = also tunneled (no leak); mismatch = bypassing the VPN and exposing your real ISP (real leak). Avoids the "any IPv6 = alarm" false positive | same |
 | WebRTC | `webrtc-leak-test.html` active detection: real STUN probe, compares srflx vs exit IP for a leak verdict; `browse-vpn --webrtc` runs it inside the real tunnel | same (pure front-end, identical cross-platform) |
-| Link quality | Pulls 20MB from the Cloudflare speed endpoint through the active takeover path (TUN directly / system proxy via `-x`), reads `time_appconnect` and `speed_download`, maps to 480p/720p/1080p tiers | same (on macOS the proxy address comes from `scutil --proxy`; PAC mode is skipped to avoid a misleading number) |
+| Link quality | Pulls 20MB from the Cloudflare speed endpoint through the active takeover path (TUN directly / system proxy via `-x`), reads `time_appconnect` and `speed_download`, maps to 480p/720p/1080p tiers ; PAC mode is skipped to avoid a misleading number | same (on macOS the proxy address comes from `scutil --proxy`, skipped when it cannot be read). PAC mode is **not** detected separately on Unix — it measures as if there were no takeover |
 
 > Isolated Chrome profiles live in `chrome-<country>-profile/` (git-ignored, never committed).
 > Both platforms share the same directory naming.
@@ -337,11 +521,48 @@ in `browse-vpn.sh`.
   warning about sharing China's offset. Timezone name and language are already aligned to the
   exit country; the only way to dodge the hint is a node outside the +8 zone.
 - **Datacenter IPs (IDC/hosting flag) and risk scores depend on node quality**: audit check #1
-  surfaces the proxy/hosting flag, but no script can change an IP's attributes — platforms with
+  surfaces the proxy/hosting flag (and `browse-vpn` / `app-vpn` warn about it before starting a
+  session, including small hosting shops ip-api has no record of but whose ASN range gives them
+  away — those two only warn, never block, and do not produce the full verdict), but no script
+  can change an IP's attributes — platforms with
   strict risk control (e.g. Claude) are sensitive to datacenter ranges; switch to a residential
   ("native") IP node to fix that.
+- **A "residential" verdict is a heuristic, not proof — and "residential" is not the same as
+  "safe"**: this is the largest remaining blind spot. The residential-proxy industry sells
+  exactly this — real residential IPs on real incumbent-carrier ASNs. Such an exit reports
+  `hosting=false`, holds a 16-bit ASN and a famous carrier name, clears every gate in this
+  toolkit and is labelled "residential/consumer", while potentially being
+  shared with hundreds of other users. A sticky-session residential proxy defeats the rotation
+  check too.
+- **It targets one specific failure — "new small hosting shops holding 32-bit ASNs" — and is
+  not a general datacenter detector**: established large datacenters hold 16-bit ranges, which
+  the ASN rule cannot see. That is a division of labour rather than a defect; the two mechanisms
+  are complementary along the allocation-era axis, verified against real data:
+
+  | Mechanism | Covers | Evidence from a real run |
+  |---|---|---|
+  | ip-api `hosting=true` | Established clouds (old 16-bit ranges) | AWS AS16509, DigitalOcean AS14061, Oracle AS31898 — 6/6 caught |
+  | ASN allocation era | New small hosting shops (32-bit ranges) | IPS INC AS131939, Pittqiao AS131642, Mejiro AS209642 — 3/3 caught, all three missed by ip-api |
+
+  On its own the ASN rule misses all 6 big clouds, but none of them is misclassified as
+  **residential** (the only unacceptable direction) and all were already stopped by the earlier
+  gate. By the same token, a legitimate regional broadband provider founded after 2014 whose
+  name carries no carrier word will be misjudged — costing one candidate (never the whole pool);
+  add its ASN to `residential-asn.txt` to fix it permanently.
+- **The built-in residential ASN list has not been verified entry by entry**: a wrong entry
+  naming a nonexistent ASN is harmless (it never matches). The one genuinely unsafe direction
+  is naming a real *hosting* ASN, which would exempt it from the provenance gate. The mitigation
+  is structural: ip-api's own `hosting=true` verdict runs independently at an earlier gate, so
+  the list only ever influences nodes ip-api did **not** flag as datacenter.
+- **Exit-rotation detection is sampling, not proof**: by default it probes twice within a few
+  seconds, which catches per-connection and short-cycle rotation but **not slow rotation** (an
+  exit that changes every 10 minutes passes as "stable"). A "stable" verdict means only *this
+  time we did not catch it*, not that the exit is exclusively yours. Raise `-IpProbes` and
+  `-ProbeGapMs` for more confidence, at a linear cost in time.
 - This only fixes *technical* signals. Account-level behavior (login history, payment
-  region, shipping addresses) is not covered — keep those consistent yourself.
+  region, shipping addresses) is not covered — keep those consistent yourself. See the
+  framing section at the top: **account provenance is the highest-weight factor no script can
+  touch.**
 - **Windows only**: switching the system timezone makes **every program's** clock follow the
   exit country during the session; local-time-triggered scheduled tasks shift accordingly —
   expected, and auto-restored when the browser closes. The macOS / Linux version never
@@ -383,7 +604,7 @@ in `browse-vpn.sh`.
   health — `ping` / `tracert` / `nslookup` carry no diagnostic value here. Likewise your
   client's "latency test" only measures one handshake round-trip and **says nothing about
   bandwidth**: in real testing a node ranking mid-pack on latency came dead last on
-  throughput (2.72 Mbps — not even enough for 480p). Judge speed by check 7 instead.
+  throughput (2.72 Mbps — not even enough for 480p). Judge speed by check 8 instead.
 
 ## License
 

@@ -109,14 +109,17 @@ fi
 # ---- 1) 探测出口（指定了 --proxy 时探测也走它，保证拿到真实出口）----
 echo "${C_CYAN}探测当前 VPN 出口……${C_RESET}"
 resp=$(curl -fsS --max-time 15 ${PROXY:+-x "$PROXY"} \
-  "http://ip-api.com/line/?fields=status,country,countryCode,city,timezone,offset,isp,query,proxy,hosting" 2>/dev/null)
-ip_status=""; ip_country=""; ip_cc=""; ip_city=""; ip_tz=""; ip_offset=""; ip_isp=""; ip_query=""; ip_proxy=""; ip_hosting=""
+  "http://ip-api.com/line/?fields=status,country,countryCode,city,timezone,offset,isp,as,query,proxy,hosting" 2>/dev/null)
+ip_status=""; ip_country=""; ip_cc=""; ip_city=""; ip_tz=""; ip_offset=""; ip_isp=""; ip_as=""; ip_query=""; ip_proxy=""; ip_hosting=""
 if [ -n "$resp" ]; then
-    # 注意：ip-api 的 line 格式按其固定字段顺序返回（query 在最后），与请求参数顺序无关
+    # 注意：ip-api 的 line 格式按其固定字段顺序返回，与请求参数顺序无关。
+    # 已实测确认（用打乱的请求顺序 A/B 对照）：as 排在 isp 之后、proxy 之前，query 在最后。
+    # 改字段前务必重测 —— 位置读取链串位是静默错误，不会报任何错。
     # ip_isp 本脚本不展示，仅作占位以推进到后续字段（故 shellcheck 忽略未使用告警）
     # shellcheck disable=SC2034
     { read -r ip_status; read -r ip_country; read -r ip_cc; read -r ip_city; read -r ip_tz
-      read -r ip_offset; read -r ip_isp; read -r ip_proxy; read -r ip_hosting; read -r ip_query; } <<EOF
+      read -r ip_offset; read -r ip_isp; read -r ip_as; read -r ip_proxy; read -r ip_hosting
+      read -r ip_query; } <<EOF
 $resp
 EOF
 fi
@@ -133,6 +136,16 @@ else
     echo "${C_GRAY}  位置    : $ip_city / $ip_country ($ip_cc), $ip_tz (UTC$(printf '%+d' $((ip_offset/3600))):00)${C_RESET}"
     if [ "$ip_proxy" = "true" ] || [ "$ip_hosting" = "true" ]; then
         echo "${C_YELLOW}  注意：该 IP 被标记为 proxy/hosting，高风控平台可能拦截。${C_RESET}"
+    else
+        # hosting=false 只说明 ip-api 库里没这条记录，不等于住宅。16 位 ASN 空间在 2014 年前后
+        # 被各注册局分配殆尽，家宽运营商全都在那之前拿到号段；32 位 ASN 绝大多数是之后注册的
+        # 小主机商。只告警，因此不需要 auto-select-node 那张住宅 ASN 名单。
+        exit_asn=""
+        case "$ip_as" in AS[0-9]*) exit_asn=${ip_as#AS}; exit_asn=${exit_asn%% *} ;; esac
+        if [ -n "$exit_asn" ] && [ "$exit_asn" -ge 65536 ]; then
+            echo "${C_YELLOW}  注意：出口 AS${exit_asn} 是 32 位 ASN（2014 年后发放），多半是小主机商而非住宅段。${C_RESET}"
+            echo "${C_GRAY}        ip-api 没标记它，不代表它干净。跑 ./vpn-leak-audit.sh 看完整判定。${C_RESET}"
+        fi
     fi
     cc=$ip_cc; iana=$ip_tz; ipOffset=$ip_offset
     if [ -n "$COUNTRY" ] && [ "$COUNTRY" != "$cc" ]; then

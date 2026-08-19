@@ -7,7 +7,7 @@
 [![verify](https://github.com/Mr-Salticidae/vpn-guard/actions/workflows/verify.yml/badge.svg)](https://github.com/Mr-Salticidae/vpn-guard/actions/workflows/verify.yml)
 [![version](https://img.shields.io/github/v/tag/Mr-Salticidae/vpn-guard?label=version)](https://github.com/Mr-Salticidae/vpn-guard/releases)
 （每次推送在云端真实 macOS + Linux 上跑：语法 / shellcheck / 泄露自查 / 真 Chrome 遵从 `TZ` /
-`app-vpn` 进程级 `TZ` 注入验证）
+`app-vpn` 进程级 `TZ` 注入验证 / **出口归属分类器行为回归**（硬闸门，`.ps1` 与 `.sh` 输出逐字节比对））
 
 > **Windows / macOS / Linux** 用户在使用 VPN 访问**受地区限制的平台**时，用来自查真实身份是否泄露、
 > 并让浏览器指纹（时区 / 语言）与出口 IP 所在国**保持一致**的一组脚本。
@@ -21,6 +21,31 @@
 
 > ⚠️ 面向正当用途：访问因地区限制而无法正常打开的学术 / 研究 / 公共资源，以及个人隐私保护。
 > 请遵守你所在地和目标平台的法律与服务条款。
+
+---
+
+## 先说清楚：它保住你已有的信任资产，造不出信任资产
+
+这是本仓库最容易被误读的一点，所以放在最前面。
+
+风控几乎都是**累加计分 + 阈值触发**，不是单点判死。真正决定生死的因素按权重排：
+
+| 权重 | 因素 | 本工具 |
+|:---:|---|---|
+| 1 | **出口 IP 的共享密度与信誉** —— 机房段、多账号共用同一出口导致的关联封禁 | ⚠️ 只覆盖一半：归属门槛能判机房段，但**没有任何东西能测出一个 IP 背后挂了多少账号** |
+| 2 | **账号出身** —— 注册 IP 国别、支付方式归属地、账号年龄、自注册 vs 合租买号 | ❌ **完全管不到** |
+| 3 | **行为模式** —— 国家跳变（客户端自动切换造成 impossible travel）、一号多设备、并发 | ✅ 出口轮换检测 |
+| 4 | **技术指纹** —— 时区 / 语言 / WebRTC / DNS 不一致 | ✅ `browse-vpn`、`app-vpn` |
+
+**第 2 层是高权重因素里工具唯一碰不到的**，而它恰恰能解释「同样用代理，为什么有人从没事、有人反复被封」：
+
+风控对老账号建的是 **per-account baseline**（这个账号的正常长什么样），对新账号只能用 **population prior**
+（这类特征的人一般是什么货色）。一个用了多年、有连续良性历史的号，「从代理 IP 登录」早就写进了它的基线，
+不构成异常；一个上周为了注册而新建的号没有基线可比，只能落到人群先验上，而机房段的人群先验极差。
+**同样的出口 IP、同样的指纹，判罚可以天差地别。**
+
+所以：装上这套脚本，不会让一个新号变安全。它的价值是**别让一个本来就干净的号，因为技术疏漏白白掉分**。
+如果你的号反复被封而这套工具没帮上忙，问题多半在第 2 层，那不是脚本能解决的。
 
 ---
 
@@ -105,8 +130,13 @@ powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoSpeedTest  # �
 > **出口归属**（第 1 项）：`hosting=false` 只说明 ip-api 库里没这条记录，**不等于住宅**。
 > 实测中 `IPS INC` / `Pittqiao Network Information` / `Mejiro Network Limited` 三家小主机商
 > `hosting` 全是 `false`，旧版会对它们输出"读起来像住宅/普通 ISP"——这是错的。
-> 现在按 ASN 分配年代做三态判定（判据与 `auto-select-node` 同源，详见第 6 节），
-> 且**「未识别」是默认值**：判据不足时只说不知道，绝不说安全。
+> 现在按 ASN 分配年代做三态判定，且**「未识别」是默认值**：判据不足时只说不知道，绝不说安全。
+>
+> **注意两处判定并不同源**：自查只用「分配年代 + 同一份 `residential-asn.txt` 名单」这一条阶梯；
+> `auto-select-node`（第 6 节）在它之上还叠了机构名词表等辅助信号，是加权评分。
+> 因此**同一个出口两边可能给出不同判定**——实测例子：32 位 ASN 但机构名含运营商词的出口，
+> 选点器判「未识别」而自查判「推断为机房」；16 位 ASN 但机构名含 `Hosting` 的出口反过来。
+> 两者共用的只有那份 ASN 名单，`verify-unix.sh` 第 11 项机械比对它不漂移。
 >
 > **桌面应用 / CLI 出口实测**（第 2 项）：用 `curl --noproxy '*'` 复刻"完全不认代理的程序"发起请求，
 > 再与第 1 项的浏览器出口比对。**两者不一致就说明 Claude / Codex 这类程序正在绕过代理直连**。
@@ -281,13 +311,17 @@ macOS / Linux 直接传国家码即可（`./browse-vpn.sh jp`），无需单独�
 在安全性前提下自动找到最优代理节点并切换。通过 mihomo named pipe API 通信，渐进式筛选：
 
 1. **延迟预筛**：组内全部节点 → 按延迟排序，保留 Top N
-2. **安全性测试**：逐节点切换 → **多次**查询出口 IP → 淘汰 proxy / 机房标记 / **出口轮换** / **非住宅 ASN**
+2. **安全性测试**：逐节点切换 → **多次**查询出口 IP → 淘汰 proxy / 机房标记 / **出口轮换** / **推断为机房的出口**（「未识别」不淘汰）
 3. **带宽测试**：安全通过的节点 → Cloudflare 测速点测 TLS 握手 + 吞吐
 4. **自动部署**：综合评分（带宽 60% + 延迟 25% + TLS 15%）最高者自动切换
 
 > ⚠️ v1.1.0 之前延迟那 25% **实际上是失效的**：`delay` 存在 hashtable 键里，而 `Measure-Object`
-> 只认 PSObject 属性，取不到最大/最小值就退化成常数，真正生效的是「带宽 80% + TLS 20%」。
-> 已修复。修复会改变排序结果——实测中冠军由台湾07（142ms）变为香港03（101ms）。
+> 只认 PSObject 属性，取不到最大/最小值就退化成常数，真正生效的是「带宽 80% + TLS 20%」。已修复。
+>
+> 修复后延迟项才真正参与评分，**是否改变名次取决于当批数据**：2026-08-19 的一次实测里名次翻转
+> （台湾07 142ms 由 100 分降到 75，香港03 101ms 由 98.2 升到 88.3，冠军易主）；而仓库里的
+> `auto-select-live.txt`（2026-08-11）那批数据名次不变，只是分数变了（香港03 92.8 → 67.7）。
+> 两批数据的结论不同是正常的——差别在于高延迟节点不再白拿那 25 分。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1                 # 默认: 国外默认组, Top10→Top5
@@ -296,7 +330,8 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -TopN 15 -TopM 3
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -Group "国外媒体"
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -AllowHosting   # 允许机房 IP（放宽安全门槛）
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -IpProbes 3     # 每节点探 3 次出口（默认 2，1=关闭轮换检测）
-powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -AllowRotating  # 允许轮换出口（放宽安全门槛）
+powershell -ExecutionPolicy Bypass -File .uto-select-node.ps1 -AllowRotating  # 允许轮换出口（放宽安全门槛）
+powershell -ExecutionPolicy Bypass -File .uto-select-node.ps1 -ProbeGapMs 5000 # 两次出口探测的间隔，默认 2500 毫秒
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -AllowDatacenter   # 不按出口归属淘汰
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -PreferResidential # 住宅出口优先（只重排序）
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    # 跳过带宽测试，仅按延迟+安全排序
@@ -318,7 +353,7 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 > 用 `-IpProbes 1` 可完全关闭该检测（恢复旧行为），`-AllowRotating` 则检测但不淘汰。
 >
 > **已注定淘汰的节点会跳过复探**：节点若已因 `proxy` / `hosting` 出局，它轮不轮换都改变不了结果，
-> 复探纯属浪费时间，直接短路。实测中 Top10 有 6 个是机房 IP，复探次数因此从 30 次降到 18 次。
+> 复探纯属浪费时间，直接短路。实测（`-IpProbes 3`）中 Top10 有 6 个是机房 IP，出口探测因此从 30 次降到 18 次；默认 `-IpProbes 2` 下是 20 → 14。
 > 副作用是这类节点的淘汰理由只会显示「机房 IP」而不是「轮换」——两者都是硬淘汰，结果一致，
 > 丢失的只是诊断标签；加了 `-AllowHosting` 时机房节点会继续进入排序，此时复探照常执行，信息不丢。
 >
@@ -330,17 +365,31 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 > 注册局分配殆尽，而做大众家宽需要巨量地址和多年运营史，所以在位运营商全都持有低号段
 > （中华电信 AS3462、KT AS4766、SoftBank AS17676、HKT AS4760、Comcast AS7922……）。
 > 反过来，32 位 ASN（≥ 65536）绝大多数是 2014 年后新注册的小主机商。IPv4 与 16 位 ASN
-> 空间双双耗尽，**这条分界线不会再移动**——不像品牌词表那样会随时间腐坏。
+> 空间双双耗尽，**这条分界线本身不会再移动**。
 > 数据取自 `as` / `asname` 字段，**与现有请求同一次调用，零额外配额开销**。
+>
+> 但**分类器不止这一条判据**（这点别被上面那段带偏）：它是一个加权评分，总分 ≥ 3 判机房——
+> 分配年代 +3（号段 ≥ 200000 再 +1）、机构名含机房词 +3（**单这一条就够到阈值**）、
+> 亚太落地的欧洲 RIPE 段 +2、AS-NAME 仍是 RIR 占位符 +1、机构名含运营商词 **−3**。
+> 分配年代那条不会腐坏，**两张词表会**——`verify-classifier.sh` 为它们留了专门的哨兵，
+> 改词表之前先跑它。
 >
 > **淘汰是「相对」的**：只有池中还留得下非机房节点时，机房节点才被剔除。全池都被判为机房
 > 时门槛整体让位、一个都不淘汰，并提示换机场——**候选池被清空在结构上不可能发生**。
 > 三档判定中 `未识别` 是「信息缺失」而非「负面结论」，永远不参与淘汰。
 >
 > 用 `-AllowDatacenter` 关闭淘汰（分类仍照常显示）；`-PreferResidential` 让住宅出口在排序中
-> 整体优先——它是**字典序分档**而非加分项，池中没有住宅节点时排序与不加完全一致。
+> 整体优先——它是**字典序分档**而非加分项：池中节点归属档位相同时，排序与不加完全一致；与 `-AllowDatacenter` 同用时，「未识别」档仍会整体排在「推断为机房」的节点之前（这是预期行为）。
 > 认错了可把 ASN 写进 `residential-asn.txt`（脚本对每个节点都打印 `ASN : AS<号> <机构名>`，
 > 从自己的运行日志里收割即可），不必改脚本。
+>
+> ⚠️ **跑之前先退掉高风控平台的会话**。这是本节最该先知道的一条操作事实：
+> Step 2 / Step 3 会把**全局出口**逐个切到每个候选节点上——默认最多十余次
+> （Top10 安全测试各切一次 + Top5 带宽测试各切一次 + 最后部署或还原一次），
+> 每次停留数秒，**包括那些随后才被判 proxy / 机房 / 轮换而淘汰的节点**。
+> 此时若开着 Claude / ChatGPT，你的会话会在几分钟内跨多国跳变——正是开头那张权重表里
+> 第 3 层的「国家跳变 / impossible travel」。
+> **`-DryRun` 同样会切**，它只是不部署赢家，结束时把原节点还原回去。
 >
 > **前提**：Clash Verge Rev (mihomo) 正在运行，TUN 模式已开启。
 > 脚本通过 `\\.\pipe\verge-mihomo` named pipe 与 mihomo 通信，不依赖 TCP 外部控制器端口。
@@ -348,7 +397,7 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 > **别用客户端面板的延迟数字挑节点**——那只测一次握手往返，不反映带宽，也不检查 IP 信誉，
 > 更看不出这个节点是不是负载均衡池。面板里延迟最低的节点往往是所有人都在用的节点，
 > 也就是共享出口密度最高、关联风险最大的那个。
-> 本脚本的安全检测（proxy/hosting 标记 + 出口轮换）是面板里完全没有的维度。
+> 本脚本的安全检测（proxy/hosting 标记 + 出口轮换 + 出口归属）是面板里完全没有的维度。
 
 ## 工作原理 / How it works
 
@@ -364,7 +413,7 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 | IP | 由 TUN / 系统代理 / `--proxy` 接管，脚本审查接管方式 | 同左 |
 | IPv6 | 取公网 IPv6 后查其归属并**与出口国比对**：一致=也走隧道（未泄露）；不一致=绕过 VPN 暴露真实 ISP（真泄露）。避免"有 IPv6 就报警"的误报 | 同左 |
 | WebRTC | `webrtc-leak-test.html` 主动检测：真实 STUN 探测，对比 srflx 与出口 IP 判定是否泄露；`browse-vpn --webrtc` 在真实隧道内跑 | 同左（纯前端，跨平台一致） |
-| 链路质量 | 走当前接管路径（TUN 直连隧道 / 系统代理加 `-x`）向 Cloudflare 测速点取 20MB，读 `time_appconnect` 与 `speed_download`，按 480p/720p/1080p 档位判定 | 同左（macOS 系统代理从 `scutil --proxy` 取地址；PAC 模式跳过以免失真） |
+| 链路质量 | 走当前接管路径（TUN 直连隧道 / 系统代理加 `-x`）向 Cloudflare 测速点取 20MB，读 `time_appconnect` 与 `speed_download`，按 480p/720p/1080p 档位判定 | PAC 模式跳过以免失真 | 同左（macOS 系统代理从 `scutil --proxy` 取地址，读不到时跳过）。PAC 模式未单独识别，会按「无接管」直测 |
 
 > 独立 Chrome 配置存放于 `chrome-<国家>-profile/`（已在 `.gitignore` 忽略，不会进仓库），
 > 两个平台的脚本共用同一套目录命名。
@@ -372,7 +421,7 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 ## 局限 / Caveats
 
 - **检测页把 UTC+8 本身标为「更像中国用户」**：新加坡 / 马来西亚等节点本就在 +8 时区，与出口 IP 完全一致，不算泄露；这是检测页对「与中国相同偏移」的笼统提示。脚本已把时区名和语言对齐到出口国，要彻底规避这条提示只能换非 +8 时区的节点。
-- **机房 IP（IDC/hosting 标记）与风险评分取决于节点质量**：自查第 1 项会提示 proxy/hosting 标记，但脚本无法改变 IP 属性——高风控平台（Claude 等）对机房段敏感，需换住宅 IP（原生 IP）节点才能解决。
+- **机房 IP（IDC/hosting 标记）与风险评分取决于节点质量**：自查第 1 项会提示 proxy/hosting 标记，但脚本无法改变 IP 属性——高风控平台（Claude 等）对机房段敏感，需换住宅 IP（原生 IP）节点才能解决。`browse-vpn` / `app-vpn` 启动会话前也会就这一点告警（含 ip-api 未收录、但 ASN 号段暴露了身份的小主机商），但它们只提示、不阻拦，也不做完整判定——完整判定看自查第 1 项。
 - **住宅 ASN 判定是启发式，不是证明；判为住宅更不等于安全**：这是本工具最大的剩余盲区——住宅代理产业卖的正是「真实住宅 IP + 在位运营商 ASN」，它 `hosting=false`、ASN 是 16 位、名字是知名运营商，能通过本脚本的每一道门槛并被标为「住宅/消费级」，而它背后可能挂着几百个共用者。粘性会话的住宅代理连轮换检测也一并绕过。
 - **它只针对「持 32 位 ASN 的新小主机商」这一类失败，不是通用机房检测器**：老牌大机房持的是 16 位号段，ASN 规则看不见它们。这不是缺陷而是分工——两个机制沿号段年代这条轴线正好互补，已用实测数据验证：
 
@@ -386,7 +435,7 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
   代价是少一个候选（而非清空池），把它的 ASN 写进 `residential-asn.txt` 即可永久修正。
 - **内置住宅 ASN 名单未逐条实测**：写错一个不存在的号是无害的（永远匹配不上）；唯一危险方向是把真正的主机商 ASN 写了进去，那会让它免于归属淘汰。缓解在于 ip-api 的 `hosting=true` 判定在更早的关卡独立生效，名单的影响范围仅限于「ip-api 没标记为机房」的那批节点。
 - **出口轮换检测是抽样，不是证明**：默认只在几秒内探 2 次，抓得住「每连接轮换」和「短周期轮换」的池子，但**抓不住慢速轮换**（比如每 10 分钟才换一次出口）——那种节点会以「出口稳定」通过。判定为稳定只代表**这次没抓到**，不代表它一定是独占出口。想提高把握就加 `-IpProbes` 和 `-ProbeGapMs`，代价是耗时线性增长。
-- 只解决"**技术信号别露馅**"。账号自身的行为特征（登录历史、支付地区、填写地址）不在此列，需你自己保持一致。
+- 只解决"**技术信号别露馅**"。账号自身的行为特征（登录历史、支付地区、填写地址）不在此列，需你自己保持一致。参见开头的定位说明：**账号出身是高权重因素里、工具唯一完全碰不到的那一层。**
 - **仅 Windows**：切换系统时区会让**所有程序**的显示时钟随出口国走；会话期间若有按本地时间触发的定时任务会顺移，属正常，浏览器关闭后自动还原。macOS / Linux 版不改系统时区，无此影响。（`app-vpn.ps1` 只在你显式加 `-SystemTz` 时才会切系统时区，CLI 场景默认不切。）
 - **`app-vpn` 靠环境变量约定生效，不是强制拦截**：它注入 `HTTPS_PROXY` 等变量，前提是目标程序愿意读。绝大多数 Node / Rust / Go / Python 生态的工具都读，但**硬编码直连、或自带网络栈完全忽略这些变量的程序它管不住**。要对任意程序都强制生效，只有 TUN 模式（内核层接管）。自查第 2 项测的正是"完全不读代理设置的程序"这一最坏情况——它报绿，才说明 TUN 真的兜住了。
 - **Electron 应用的时区是半覆盖的**：`app-vpn` 注入的 `TZ` 在 Windows 上只对 Node 主进程生效，Chromium 渲染层（也就是应用里显示的网页内容）仍读系统时区，必须加 `-SystemTz` 才一致。macOS / Linux 无此问题。
@@ -396,7 +445,7 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 - 系统代理模式下浏览器是安全的，但 UDP/WebRTC 与不认代理的应用可能绕行——想全局兜住请开客户端的 TUN 模式。
 - DNS 泄露主动实测依赖第三方服务 [bash.ws](https://bash.ws)（与 ip-api / ipify 同为默认联网项）：只发随机子域探测、不上传个人数据，服务只看到你的解析器 IP（这正是检测目标）。介意联网可加 `--no-dns-leak`。fake-ip 环境下若仍报解析器在本地，多因客户端 DNS 用了域内上游——按提示让 DNS 走隧道远端解析即可。
 - **链路质量只是一次快检，不是测速软件**：单次 20MB / 8 秒采样，够区分「能不能看 720p / 1080p」这几档，但对高速链路（>100 Mbps）区分度不足，同一节点多次测量会有波动。要在多个节点间**排序**请用专门的测速工具，别拿这个数字做精细比较。它依赖 Cloudflare 测速点（`speed.cloudflare.com`），不可达时会优雅跳过并提示——那本身也是节点不稳的信号。
-- **ping 通 ≠ 链路可用**：fake-ip 模式下所有域名都解析到 `198.18.x.x`、ICMP 由本机应答，无论节点好坏 ping 都秒通、延迟接近 0，`ping` / `tracert` / `nslookup` 在这里全部失去诊断意义。同理，客户端面板的「延迟测试」只测一次握手往返，**不反映带宽**——实测中出现过延迟排名中上游的节点带宽垫底（2.72 Mbps，连 480p 都紧张）。判断快慢请看第 7 项的握手耗时与吞吐。
+- **ping 通 ≠ 链路可用**：fake-ip 模式下所有域名都解析到 `198.18.x.x`、ICMP 由本机应答，无论节点好坏 ping 都秒通、延迟接近 0，`ping` / `tracert` / `nslookup` 在这里全部失去诊断意义。同理，客户端面板的「延迟测试」只测一次握手往返，**不反映带宽**——实测中出现过延迟排名中上游的节点带宽垫底（2.72 Mbps，连 480p 都紧张）。判断快慢请看第 8 项的握手耗时与吞吐。
 
 ## 许可 / License
 
