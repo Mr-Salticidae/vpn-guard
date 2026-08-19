@@ -270,9 +270,13 @@ macOS / Linux 直接传国家码即可（`./browse-vpn.sh jp`），无需单独�
 在安全性前提下自动找到最优代理节点并切换。通过 mihomo named pipe API 通信，渐进式筛选：
 
 1. **延迟预筛**：组内全部节点 → 按延迟排序，保留 Top N
-2. **安全性测试**：逐节点切换 → 查询出口 IP → 淘汰 proxy / 机房标记
+2. **安全性测试**：逐节点切换 → **多次**查询出口 IP → 淘汰 proxy / 机房标记 / **出口轮换** / **非住宅 ASN**
 3. **带宽测试**：安全通过的节点 → Cloudflare 测速点测 TLS 握手 + 吞吐
 4. **自动部署**：综合评分（带宽 60% + 延迟 25% + TLS 15%）最高者自动切换
+
+> ⚠️ v1.1.0 之前延迟那 25% **实际上是失效的**：`delay` 存在 hashtable 键里，而 `Measure-Object`
+> 只认 PSObject 属性，取不到最大/最小值就退化成常数，真正生效的是「带宽 80% + TLS 20%」。
+> 已修复。修复会改变排序结果——实测中冠军由台湾07（142ms）变为香港03（101ms）。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1                 # 默认: 国外默认组, Top10→Top5
@@ -280,6 +284,10 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -DryRun         
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -TopN 15 -TopM 3 # 自定义每轮保留数量
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -Group "国外媒体"
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -AllowHosting   # 允许机房 IP（放宽安全门槛）
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -IpProbes 3     # 每节点探 3 次出口（默认 2，1=关闭轮换检测）
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -AllowRotating  # 允许轮换出口（放宽安全门槛）
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -AllowDatacenter   # 不按出口归属淘汰
+powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -PreferResidential # 住宅出口优先（只重排序）
 powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    # 跳过带宽测试，仅按延迟+安全排序
 ```
 
@@ -287,11 +295,49 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 > 高风控平台（Claude 等）对机房段敏感，住宅 IP 节点才是安全选择。
 > 用 `-AllowProxy` / `-AllowHosting` 可放宽门槛，但需自行承担风险。
 >
+> **出口轮换检测（默认开启）**：同一节点连续探测 2 次出口 IP（每个 `curl` 进程都是独立连接，
+> 不复用连接池），前后不一致即判定它背后是一个**负载均衡 / 多出口池**并淘汰。
+> 这类节点有两层危害，而且**在客户端面板里与普通节点完全无法区分**：
+>
+> 1. **出口被大量账号共享** —— 平台按 IP 聚类做关联判定，一个号出事整簇连坐；
+> 2. **你自己的会话在 IP / 国家间漂移** —— 直接触发异地登录风控。
+>
+> 跨国轮换（两次探测落在不同国家）比同国轮换更致命，淘汰理由会分别标注。
+> **复探失败一律不淘汰**：超时或 ip-api 限流时按「未检测」处理，宁可漏判也不误杀。
+> 用 `-IpProbes 1` 可完全关闭该检测（恢复旧行为），`-AllowRotating` 则检测但不淘汰。
+>
+> **已注定淘汰的节点会跳过复探**：节点若已因 `proxy` / `hosting` 出局，它轮不轮换都改变不了结果，
+> 复探纯属浪费时间，直接短路。实测中 Top10 有 6 个是机房 IP，复探次数因此从 30 次降到 18 次。
+> 副作用是这类节点的淘汰理由只会显示「机房 IP」而不是「轮换」——两者都是硬淘汰，结果一致，
+> 丢失的只是诊断标签；加了 `-AllowHosting` 时机房节点会继续进入排序，此时复探照常执行，信息不丢。
+>
+> **出口归属分类（默认开启）**：ip-api 的 `hosting=false` 只说明「它没被收录」，**不等于住宅**。
+> 实测中通过前面所有门槛的 4 个节点里，只有 1 个是真住宅段（中华电信），另外 3 个
+> （`IPS INC` / `Pittqiao Network Information` / `Mejiro Network Limited`）都是小主机商。
+>
+> 判据是一个**结构性事实**，不是名字长相：16 位 ASN 空间（1–65535）在 2014 年前后被各
+> 注册局分配殆尽，而做大众家宽需要巨量地址和多年运营史，所以在位运营商全都持有低号段
+> （中华电信 AS3462、KT AS4766、SoftBank AS17676、HKT AS4760、Comcast AS7922……）。
+> 反过来，32 位 ASN（≥ 65536）绝大多数是 2014 年后新注册的小主机商。IPv4 与 16 位 ASN
+> 空间双双耗尽，**这条分界线不会再移动**——不像品牌词表那样会随时间腐坏。
+> 数据取自 `as` / `asname` 字段，**与现有请求同一次调用，零额外配额开销**。
+>
+> **淘汰是「相对」的**：只有池中还留得下非机房节点时，机房节点才被剔除。全池都被判为机房
+> 时门槛整体让位、一个都不淘汰，并提示换机场——**候选池被清空在结构上不可能发生**。
+> 三档判定中 `未识别` 是「信息缺失」而非「负面结论」，永远不参与淘汰。
+>
+> 用 `-AllowDatacenter` 关闭淘汰（分类仍照常显示）；`-PreferResidential` 让住宅出口在排序中
+> 整体优先——它是**字典序分档**而非加分项，池中没有住宅节点时排序与不加完全一致。
+> 认错了可把 ASN 写进 `residential-asn.txt`（脚本对每个节点都打印 `ASN : AS<号> <机构名>`，
+> 从自己的运行日志里收割即可），不必改脚本。
+>
 > **前提**：Clash Verge Rev (mihomo) 正在运行，TUN 模式已开启。
 > 脚本通过 `\\.\pipe\verge-mihomo` named pipe 与 mihomo 通信，不依赖 TCP 外部控制器端口。
 >
-> **别用客户端面板的延迟数字挑节点**——那只测一次握手往返，不反映带宽，也不检查 IP 信誉。
-> 本脚本的安全检测（proxy/hosting 标记）是面板里完全没有的维度。
+> **别用客户端面板的延迟数字挑节点**——那只测一次握手往返，不反映带宽，也不检查 IP 信誉，
+> 更看不出这个节点是不是负载均衡池。面板里延迟最低的节点往往是所有人都在用的节点，
+> 也就是共享出口密度最高、关联风险最大的那个。
+> 本脚本的安全检测（proxy/hosting 标记 + 出口轮换）是面板里完全没有的维度。
 
 ## 工作原理 / How it works
 
@@ -316,6 +362,10 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 
 - **检测页把 UTC+8 本身标为「更像中国用户」**：新加坡 / 马来西亚等节点本就在 +8 时区，与出口 IP 完全一致，不算泄露；这是检测页对「与中国相同偏移」的笼统提示。脚本已把时区名和语言对齐到出口国，要彻底规避这条提示只能换非 +8 时区的节点。
 - **机房 IP（IDC/hosting 标记）与风险评分取决于节点质量**：自查第 1 项会提示 proxy/hosting 标记，但脚本无法改变 IP 属性——高风控平台（Claude 等）对机房段敏感，需换住宅 IP（原生 IP）节点才能解决。
+- **住宅 ASN 判定是启发式，不是证明；判为住宅更不等于安全**：这是本工具最大的剩余盲区——住宅代理产业卖的正是「真实住宅 IP + 在位运营商 ASN」，它 `hosting=false`、ASN 是 16 位、名字是知名运营商，能通过本脚本的每一道门槛并被标为「住宅/消费级」，而它背后可能挂着几百个共用者。粘性会话的住宅代理连轮换检测也一并绕过。
+- **它只针对「持 32 位 ASN 的新小主机商」这一类失败，不是通用机房检测器**：Hetzner（AS24940）、Sakura（AS9370）这类持 16 位号段的老牌机房会被判为「未识别」。互补之处在于 ip-api 自己的 `hosting=true` 已经在更早的关卡拦掉了大机房。同理，2014 年后成立且名字里不含运营商词的正规区域宽带商会被误判——名单只增不减，误判一次的代价是少一个候选（而非清空池），把它的 ASN 写进 `residential-asn.txt` 即可永久修正。
+- **内置住宅 ASN 名单未逐条实测**：写错一个不存在的号是无害的（永远匹配不上）；唯一危险方向是把真正的主机商 ASN 写了进去，那会让它免于归属淘汰。缓解在于 ip-api 的 `hosting=true` 判定在更早的关卡独立生效，名单的影响范围仅限于「ip-api 没标记为机房」的那批节点。
+- **出口轮换检测是抽样，不是证明**：默认只在几秒内探 2 次，抓得住「每连接轮换」和「短周期轮换」的池子，但**抓不住慢速轮换**（比如每 10 分钟才换一次出口）——那种节点会以「出口稳定」通过。判定为稳定只代表**这次没抓到**，不代表它一定是独占出口。想提高把握就加 `-IpProbes` 和 `-ProbeGapMs`，代价是耗时线性增长。
 - 只解决"**技术信号别露馅**"。账号自身的行为特征（登录历史、支付地区、填写地址）不在此列，需你自己保持一致。
 - **仅 Windows**：切换系统时区会让**所有程序**的显示时钟随出口国走；会话期间若有按本地时间触发的定时任务会顺移，属正常，浏览器关闭后自动还原。macOS / Linux 版不改系统时区，无此影响。（`app-vpn.ps1` 只在你显式加 `-SystemTz` 时才会切系统时区，CLI 场景默认不切。）
 - **`app-vpn` 靠环境变量约定生效，不是强制拦截**：它注入 `HTTPS_PROXY` 等变量，前提是目标程序愿意读。绝大多数 Node / Rust / Go / Python 生态的工具都读，但**硬编码直连、或自带网络栈完全忽略这些变量的程序它管不住**。要对任意程序都强制生效，只有 TUN 模式（内核层接管）。自查第 2 项测的正是"完全不读代理设置的程序"这一最坏情况——它报绿，才说明 TUN 真的兜住了。
