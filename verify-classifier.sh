@@ -120,7 +120,7 @@ else
         if [ "$got" = "$f_exp" ]; then
             echo "PASS|$f_name"
         else
-            echo "FAIL|$f_name —— 期望 $f_exp，实得 $got"
+            echo "FAIL|$f_name —— 期望 ${f_exp}，实得 ${got}"
         fi
     done < "$TMP/fixtures" > "$TMP/verdicts"
 
@@ -263,6 +263,56 @@ else
             if [ "$st" = "PASS" ]; then ok "$msg"; else no "$msg"; fi
         done < "$TMP/cls.clean"
     fi
+fi
+
+# =============================================================================
+# D. 系统代理地址提取器（vpn-leak-audit.sh 的 SYSPROXY-EXTRACT 块）
+# 纯文本函数，可在任何平台离线穷举 —— 作者本机是 Windows，没有 mac/Linux 也能验。
+# 它决定第 1 项要不要补 -x：取错地址会让第 1 项直接红成「VPN 不在线」，
+# 取不到地址则第 3/4/5 项降级为「无法判定」。
+# =============================================================================
+echo; echo "==== D) 系统代理地址提取器 ===="
+if ! grep -q 'SYSPROXY-EXTRACT-BEGIN' vpn-leak-audit.sh 2>/dev/null; then
+    no "vpn-leak-audit.sh 里找不到 SYSPROXY-EXTRACT-BEGIN 标记"
+else
+    awk '/SYSPROXY-EXTRACT-BEGIN/,/SYSPROXY-EXTRACT-END/' vpn-leak-audit.sh > "$TMP/px.sh"
+    # 样本：名称 :: 期望输出 :: scutil 原文（\n 代表换行）
+    cat > "$TMP/pxfix" <<'PXEOF'
+标准 HTTP 代理|http://127.0.0.1:7890|HTTPEnable : 1\nHTTPPort : 7890\nHTTPProxy : 127.0.0.1
+只开 HTTPS（不被 HTTPEnable 子串误伤）|http://10.0.0.5:8443|HTTPSEnable : 1\nHTTPSPort : 8443\nHTTPSProxy : 10.0.0.5
+只开 SOCKS 必须给 socks5h|socks5h://127.0.0.1:1080|SOCKSEnable : 1\nSOCKSPort : 1080\nSOCKSProxy : 127.0.0.1
+PAC 自动配置|PAC|ProxyAutoConfigEnable : 1
+WPAD 自动发现|PAC|ProxyAutoDiscoveryEnable : 1
+全部关闭||HTTPEnable : 0\nSOCKSEnable : 0
+端口为 0 的残留配置||HTTPEnable : 1\nHTTPPort : 0\nHTTPProxy : 127.0.0.1
+缺 HTTPProxy||HTTPEnable : 1\nHTTPPort : 7890
+HTTP 残缺时回落到 SOCKS|socks5h://192.168.1.1:1080|HTTPEnable : 1\nHTTPPort : 0\nHTTPProxy : 127.0.0.1\nSOCKSEnable : 1\nSOCKSPort : 1080\nSOCKSProxy : 192.168.1.1
+__SCOPED__ 分域代理不得当成全局||SOCKSEnable : 0\n__SCOPED__ : <dictionary> {\nHTTPEnable : 1\nHTTPPort : 9999\nHTTPProxy : 10.9.9.9
+IPv6 字面量加方括号|http://[::1]:7890|HTTPEnable : 1\nHTTPPort : 7890\nHTTPProxy : ::1
+端口越界 65536||HTTPEnable : 1\nHTTPPort : 65536\nHTTPProxy : 127.0.0.1
+端口 65535 合法|http://127.0.0.1:65535|HTTPEnable : 1\nHTTPPort : 65535\nHTTPProxy : 127.0.0.1
+20 位超长端口不得溢出||HTTPEnable : 1\nHTTPPort : 99999999999999999999\nHTTPProxy : 127.0.0.1
+端口非数字||HTTPEnable : 1\nHTTPPort : abc\nHTTPProxy : 127.0.0.1
+HTTP 优先于 SOCKS|http://127.0.0.1:7890|HTTPEnable : 1\nHTTPPort : 7890\nHTTPProxy : 127.0.0.1\nSOCKSEnable : 1\nSOCKSPort : 1080\nSOCKSProxy : 127.0.0.1
+静态代理优先于 PAC|http://127.0.0.1:7890|HTTPEnable : 1\nHTTPPort : 7890\nHTTPProxy : 127.0.0.1\nProxyAutoConfigEnable : 1
+空输入||
+PXEOF
+    {
+        cat "$TMP/px.sh"
+        echo 'while IFS="|" read -r nm exp body; do'
+        echo '  got=$(printf "%b\n" "$body" | sysproxy_url_from_scutil)'
+        echo '  if [ "$got" = "$exp" ]; then printf "PASS|%s\n" "$nm"'
+        echo '  else printf "FAIL|%s —— 期望 %s 实得 %s\n" "$nm" "${exp:-<空>}" "${got:-<空>}"; fi'
+        echo 'done < "$1"'
+    } > "$TMP/pxrun.sh"
+    bash "$TMP/pxrun.sh" "$TMP/pxfix" > "$TMP/pxout" 2>"$TMP/pxerr"
+    if [ -s "$TMP/pxerr" ]; then
+        no "提取器执行报错"; sed 's/^/      /' "$TMP/pxerr" | head -5
+    fi
+    while IFS='|' read -r st msg; do
+        [ -z "$msg" ] && continue
+        if [ "$st" = "PASS" ]; then ok "$msg"; else no "$msg"; fi
+    done < "$TMP/pxout"
 fi
 
 echo; echo "============================================"

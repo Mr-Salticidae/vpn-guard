@@ -231,6 +231,14 @@ if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
     } elseif ($bare.query -eq $ipapi.query) {
         if ($TakeoverMode -eq 'none') {
             Bad ("出口 {0} 与浏览器一致，但当前没有任何接管 —— 两者都是直连，真实 IP 全程暴露" -f $bare.query)
+        } elseif (-not $TunRouted) {
+            # 「被隧道接管」这句话在非 TUN 下恒为假，与两侧 IP 是否相同无关。
+            # Windows 上第 1 项走 Invoke-RestMethod（读 WinINET 系统代理），第 2 项走 curl --noproxy，
+            # 系统代理下两者通常不同、能正确报红；但规则型客户端若把 ip-api.com 放行直连，
+            # 两侧就会相同并落到这里 —— 那时旧代码会打绿，而「不认代理的程序」其实仍是直连。
+            Warn ("出口 {0} 与浏览器一致，但当前是系统代理 / 局部接管，对外路由没走 TUN —— 无法据此判定这类程序安全" -f $bare.query)
+            Info "非 TUN 下「不认代理的程序」本来就是直连；两侧相同多半是代理对 ip-api.com 走了直连规则。"
+            Info "要真正兜住 Claude / Codex 这类程序，只有开客户端的 TUN 模式，或用 app-vpn.ps1 逐个启动。"
         } else {
             Ok ("出口 {0} 与浏览器一致 —— 不认代理的程序也被隧道接管，Claude/Codex 等不会泄露" -f $bare.query)
         }

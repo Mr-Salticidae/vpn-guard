@@ -143,6 +143,11 @@ powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoSpeedTest  # �
 > 这是被动检查看不出来的：注册表里系统代理开着、浏览器一切正常，而 Node/Electron 主进程根本不读它。
 > 判定为泄露时会同时提示两条修复路径（开 TUN / 用 `app-vpn`）。
 >
+> **非 TUN 下这一项不再给绿灯**（两版都是）：「不认代理的程序也被隧道接管」这句话在系统代理 /
+> 局部接管下**恒为假**——结构上 `TAKEOVER=sysproxy` 与「路由走 TUN」互斥，对外路由没走 TUN 网卡，
+> 就意味着这类程序按定义是直连的。两侧出口相同只说明代理对 `ip-api.com` 也走了直连规则
+> （规则型客户端很常见），不构成安全结论。现在报黄并说明原因，只有真的走了 TUN 才给绿。
+>
 > 该项同时兼任**出口轮换检测**：TUN 模式下 `--noproxy` 只关代理设置、不改路由，两次观测
 > 仍走隧道，此时 IP 不同却同属一个 ASN，说明节点背后是负载均衡池而非泄露——
 > 报黄色「出口在轮换」而不是红色泄露。仅在**对外路由确实走 TUN 网卡**时才这么判：
@@ -406,7 +411,7 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 | 时区（浏览器） | `tzutil /s` 临时切系统时区（Chrome 不认 `TZ`），会话结束 `finally` 自动还原 | `TZ=<IANA时区>` 启动 Chrome，仅该进程生效，不碰系统时区 |
 | 时区（桌面/CLI） | Node/Rust/Go 类程序**认 `TZ`**，`app-vpn` 直接进程级注入；Electron GUI 不认，需显式 `-SystemTz` 临时切系统时区 | 一律进程级注入 `TZ`（Chromium 在 Unix 上也认），系统时区从头到尾不动 |
 | 代理（桌面/CLI） | `app-vpn` 注入 `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY`（大小写各一套），地址取自 `-Proxy` 或系统代理注册表 | 同左，地址取自 `--proxy` 或 macOS `scutil --proxy` / Linux 现有环境变量 |
-| 桌面应用泄露实测 | `curl --noproxy '*'` 复刻"完全不认代理的程序"取出口，与浏览器侧（走系统代理的 .NET）出口比对，不一致即判泄露 | 同左（macOS/Linux 的 curl 同样不读系统代理设置，逻辑一致） |
+| 桌面应用泄露实测 | `curl --noproxy '*'` 复刻"完全不认代理的程序"取出口，与浏览器侧（走系统代理的 .NET）出口比对，不一致即判泄露 | **两侧都是 curl，所以第 1 项必须显式补 `-x`**：curl 不读 macOS 的 `scutil`、也不读 Linux 的 `gsettings`，不补的话两侧都直连、拿到同一个 IP，会打出假的绿色。地址取自 `scutil --proxy` / `gsettings`（SOCKS 用 `socks5h://`）；PAC 与需认证的代理取不到地址，此时第 1 项标注「出口是直连取得的」，第 3/4/5 项降级为「无法判定」 |
 | 语言 | Chrome `--lang` / `--accept-lang` + **每次启动回写**独立配置的 `intl.accept_languages` / `intl.selected_languages` 与 Local State 的 `intl.app_locale`（旧配置残留的中文指纹会被强制覆盖），不改系统区域；桌面/CLI 由 `app-vpn` 注入 `LANG` / `LC_ALL` | 同左 |
 | DNS（静态） | 独立 Chrome 配置里关闭"安全 DNS(DoH)"，强制走系统 DNS（TUN 模式=fake-ip 隧道；系统代理模式下域名由代理远端解析），避免浏览器自行解析泄露 | 同左 |
 | DNS（主动实测） | 对随机子域发起真实连接触发递归解析，用 bash.ws 回查实际应答的解析器归属国/ASN，与出口国比对判定泄露 | 同左（curl 触发，逻辑一致） |

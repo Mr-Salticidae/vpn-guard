@@ -179,6 +179,14 @@ Re-run after switching nodes or countries.
 > Node / Electron main process simply never reads it. On a leak verdict it prints both fixes
 > (enable TUN, or launch via `app-vpn`).
 >
+> **This check no longer gives a green light outside TUN** (both platforms): "proxy-unaware
+> programs are covered by the tunnel too" is **unconditionally false** under a system proxy or
+> partial takeover — structurally, `TAKEOVER=sysproxy` and "the route goes through TUN" are
+> mutually exclusive, so if the outbound route is not a TUN device those programs are direct by
+> definition. Matching exit IPs only mean the proxy also sends `ip-api.com` direct (common with
+> rule-based clients); that is not a safety conclusion. It now warns and explains, and reserves
+> the green for a genuine TUN route.
+>
 > The same check doubles as **exit-rotation detection**. Under TUN, `--noproxy` only disables
 > *proxy settings* — it does not change *routing* — so both observations still go through the
 > tunnel. If the two IPs differ but share an ASN, the node sits behind a load-balanced pool
@@ -502,7 +510,7 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 | Timezone (browser) | `tzutil /s` temporarily switches the system timezone (Chrome ignores `TZ`), auto-restored via `finally` when the session ends | Chrome launched with `TZ=<IANA timezone>` — process-scoped, system timezone untouched |
 | Timezone (desktop/CLI) | Node / Rust / Go programs **do honor `TZ`**, so `app-vpn` injects it per-process; Electron GUIs don't, hence the explicit `-SystemTz` | always process-scoped `TZ` (Chromium honors it on Unix too); system timezone never touched |
 | Proxy (desktop/CLI) | `app-vpn` injects `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` (both cases); address from `-Proxy` or the system-proxy registry key | same, address from `--proxy` or macOS `scutil --proxy` / existing Linux env vars |
-| Desktop-app leak test | `curl --noproxy '*'` replays a "completely proxy-unaware program" and its exit IP is compared against the browser-side one (.NET, which does use the system proxy); a mismatch is a leak | same (curl doesn't read system proxy settings on macOS/Linux either, so the logic is identical) |
+| Desktop-app leak test | `curl --noproxy '*'` replays a "completely proxy-unaware program" and its exit IP is compared against the browser-side one (.NET, which does use the system proxy); a mismatch is a leak | **both sides are curl here, so check #1 must pass `-x` explicitly**: curl reads neither macOS `scutil` nor Linux `gsettings`, so without it both probes go direct, return the same IP, and the audit prints a false green. The address comes from `scutil --proxy` / `gsettings` (SOCKS uses `socks5h://`); PAC and auth-required proxies yield no address, in which case check #1 is labelled "this exit was obtained directly" and checks #3/#4/#5 degrade to "cannot determine" |
 | Language | Chrome `--lang` / `--accept-lang` + **rewritten on every launch**: `intl.accept_languages` / `intl.selected_languages` in the profile and `intl.app_locale` in `Local State` (Chinese residue from older profiles is force-overwritten); system locale untouched. Desktop/CLI get `LANG` / `LC_ALL` from `app-vpn` | same |
 | DNS (static) | "Secure DNS (DoH)" disabled in the isolated Chrome profile, forcing system DNS (TUN mode = fake-ip tunnel; in system-proxy mode hostnames are resolved remotely by the proxy), so the browser can't leak its own lookups | same |
 | DNS (active test) | Triggers real connections to random subdomains to force recursive resolution, then uses bash.ws to look up which resolvers actually answered (country/ASN) and compares to the exit country | same (curl-triggered, identical logic) |

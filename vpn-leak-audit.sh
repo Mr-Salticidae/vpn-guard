@@ -36,6 +36,57 @@ zone_to_seconds() {
 }
 fmt_utc() { printf 'UTC%+d:00' "$(( $1 / 3600 ))"; }
 
+# SYSPROXY-EXTRACT-BEGIN  （verify-classifier.sh 按此标记抽取本块做表驱动回归，别删）
+# 纯函数：只读参数 / stdin，不调任何外部状态命令 —— CI 能喂罐头样本离线回归。
+# 为什么要有它：curl 不读 macOS 的 scutil、也不读 Linux 的 gsettings，只读 http_proxy
+# 等环境变量。第 1 项若不显式 -x，拿到的就是直连出口（=真实 IP），而第 2/3/4/5 项
+# 全都拿它当「浏览器侧基准」—— 基准错了，四项会一起给出假的「一致 / 未泄露」。
+sysproxy_fmt() {
+    local scheme=$1 h=$2 p=$3
+    [ -n "$h" ] || return 1
+    case "$p" in ''|*[!0-9]*) return 1 ;; esac
+    [ ${#p} -le 5 ] || return 1          # 先卡长度，避免 [ 做大整数比较时溢出报错
+    [ "$p" -gt 0 ] || return 1           # HTTPEnable:1 配 HTTPPort:0 是真实存在的残留配置
+    [ "$p" -le 65535 ] || return 1
+    case "$h" in *:*) h="[$h]" ;; esac   # IPv6 字面量要加方括号
+    printf '%s://%s:%s\n' "$scheme" "$h" "$p"
+}
+# 输入：scutil --proxy 的原文（stdin）。输出恰好一行：
+#   URL   —— curl -x 可直接用的地址
+#   PAC   —— 自动配置，没有静态地址可取
+#   空    —— 没开，或开了但配置残缺（缺 host / 端口非法）
+# 顺序 HTTP > HTTPS > SOCKS：第 1 项请求的是 http:// 的 URL（ip-api 免费版无 https），
+# 浏览器对 http:// 也是先用 Web Proxy(HTTP)。别照 app-vpn.sh 的 HTTPS 优先抄。
+# SOCKS 必须给 socks5h:// 而不是 -x http://：把 HTTP 请求塞进 SOCKS 端口，对端会把
+# 'G'(0x47) 当 SOCKS 版本号直接断链 —— 第 1 项会变成红色「VPN 不在线」，而 VPN 其实好好的。
+sysproxy_url_from_scutil() {
+    local txt v h p
+    # __SCOPED__ 之后是各网卡的分域代理，全局设置在它之前；截断，别把别的网卡读成全局。
+    txt=$(awk '$1=="__SCOPED__"{exit} {print}')
+    v=$(printf '%s\n' "$txt" | awk '$1=="HTTPEnable"{print $3; exit}')
+    if [ "$v" = "1" ]; then
+        h=$(printf '%s\n' "$txt" | awk '$1=="HTTPProxy"{print $3; exit}')
+        p=$(printf '%s\n' "$txt" | awk '$1=="HTTPPort"{print $3; exit}')
+        sysproxy_fmt "http" "$h" "$p" && return 0
+    fi
+    v=$(printf '%s\n' "$txt" | awk '$1=="HTTPSEnable"{print $3; exit}')
+    if [ "$v" = "1" ]; then
+        h=$(printf '%s\n' "$txt" | awk '$1=="HTTPSProxy"{print $3; exit}')
+        p=$(printf '%s\n' "$txt" | awk '$1=="HTTPSPort"{print $3; exit}')
+        sysproxy_fmt "http" "$h" "$p" && return 0
+    fi
+    v=$(printf '%s\n' "$txt" | awk '$1=="SOCKSEnable"{print $3; exit}')
+    if [ "$v" = "1" ]; then
+        h=$(printf '%s\n' "$txt" | awk '$1=="SOCKSProxy"{print $3; exit}')
+        p=$(printf '%s\n' "$txt" | awk '$1=="SOCKSPort"{print $3; exit}')
+        sysproxy_fmt "socks5h" "$h" "$p" && return 0
+    fi
+    v=$(printf '%s\n' "$txt" | awk '($1=="ProxyAutoConfigEnable"||$1=="ProxyAutoDiscoveryEnable")&&$3=="1"{print "1"; exit}')
+    if [ "$v" = "1" ]; then printf 'PAC\n'; return 0; fi
+    printf '\n'
+}
+# SYSPROXY-EXTRACT-END
+
 # ---- 参数 ----
 DNS_LEAK=1
 SPEED_TEST=1
@@ -179,16 +230,45 @@ case "$(uname)" in
     Darwin) route_if=$(route -n get 1.1.1.1 2>/dev/null | awk '/interface:/{print $2}') ;;
     Linux)  route_if=$(ip route get 1.1.1.1 2>/dev/null | grep -o 'dev [^ ]*' | head -1 | awk '{print $2}') ;;
 esac
-# 系统代理是否开启
-sysproxy=""
+# 系统代理是否开启 + 它的地址（第 1 项要显式经它探测）
+# 环境变量两个平台一视同仁：curl 原生就读它们，而且比我们更懂 no_proxy / 协议匹配，
+# 因此有环境变量时一律不插手 —— 那是今天就正常工作的路径，保持逐字节不变。
+ENV_PX_SET=""
+if [ -n "${http_proxy:-}${https_proxy:-}${all_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}" ]; then
+    ENV_PX_SET=1
+fi
+sysproxy=""; SYS_PX=""; SYS_PX_AUTH=""
+[ -n "$ENV_PX_SET" ] && sysproxy=1
 case "$(uname)" in
     Darwin)
-        if scutil --proxy 2>/dev/null | grep -qE '(HTTPEnable|HTTPSEnable|SOCKSEnable) : 1'; then sysproxy=1; fi ;;
+        sp=$(scutil --proxy 2>/dev/null)
+        if printf '%s
+' "$sp" | grep -qE '(HTTPEnable|HTTPSEnable|SOCKSEnable|ProxyAutoConfigEnable|ProxyAutoDiscoveryEnable) : 1'; then
+            sysproxy=1
+            SYS_PX=$(printf '%s
+' "$sp" | sysproxy_url_from_scutil)
+            # 有用户名就说明配了认证，密码在钥匙串里 —— 只读自查绝不去取它。
+            printf '%s
+' "$sp" | grep -qE '(HTTPUser|HTTPSUser|SOCKSUser) :' && SYS_PX_AUTH=1
+        fi ;;
     Linux)
-        if [ -n "${http_proxy:-}${https_proxy:-}${all_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}" ]; then
-            sysproxy=1
-        elif command -v gsettings >/dev/null 2>&1 && [ "$(gsettings get org.gnome.system.proxy mode 2>/dev/null)" = "'manual'" ]; then
-            sysproxy=1
+        if [ -z "$ENV_PX_SET" ] && command -v gsettings >/dev/null 2>&1; then
+            case "$(gsettings get org.gnome.system.proxy mode 2>/dev/null)" in
+                "'manual'")
+                    sysproxy=1
+                    gs_h=$(gsettings get org.gnome.system.proxy.http host 2>/dev/null | tr -d "'")
+                    gs_p=$(gsettings get org.gnome.system.proxy.http port 2>/dev/null)
+                    SYS_PX=$(sysproxy_fmt http "$gs_h" "$gs_p")
+                    if [ -z "$SYS_PX" ]; then
+                        gs_h=$(gsettings get org.gnome.system.proxy.socks host 2>/dev/null | tr -d "'")
+                        gs_p=$(gsettings get org.gnome.system.proxy.socks port 2>/dev/null)
+                        SYS_PX=$(sysproxy_fmt socks5h "$gs_h" "$gs_p")
+                    fi
+                    if [ "$(gsettings get org.gnome.system.proxy.http use-authentication 2>/dev/null)" = "true" ]; then
+                        SYS_PX_AUTH=1
+                    fi ;;
+                "'auto'") sysproxy=1; SYS_PX="PAC" ;;
+            esac
         fi ;;
 esac
 
@@ -203,18 +283,47 @@ case "$route_if" in
     *)
         if [ -n "$sysproxy" ]; then
             TAKEOVER="sysproxy"
-            warn "系统代理模式 —— 浏览器流量走代理；不支持代理的应用与 UDP/WebRTC 可能绕行直连"
+            case "$SYS_PX" in
+                PAC)
+                    warn "PAC / 自动配置代理 —— 命中规则的浏览器流量走代理；脚本不执行 PAC，取不到出口地址" ;;
+                '')
+                    if [ -n "$ENV_PX_SET" ]; then
+                        warn "系统代理模式（代理环境变量）—— 浏览器与认变量的程序走代理；不认的与 UDP/WebRTC 绕行直连"
+                    else
+                        warn "系统代理模式 —— 但读不到可用的代理地址（配置残缺）"
+                    fi ;;
+                *)
+                    warn "系统代理模式（${SYS_PX}）—— 浏览器流量走代理；不支持代理的应用与 UDP/WebRTC 可能绕行直连" ;;
+            esac
             info "建议：开启客户端的 TUN/增强模式（Clash Verge: TUN 模式；v2rayN: 启用 Tun；sing-box: tun 入站）"
         else
             warn "未检测到 TUN 路由或系统代理 —— 若你在用浏览器插件级代理或仅本地端口，只有明确配置了代理的应用被接管"
         fi ;;
 esac
+
+# PX1：第 1 项要显式补的 -x 地址。只在「系统代理接管、但 curl 自己看不见它」时才有值。
+# TUN / 无接管 / 有代理环境变量 三种状态下 PX1 恒为空，第 1 项与旧版逐字节等价。
+PX1=""; PX1_WHY=""
+if [ "$TAKEOVER" = "sysproxy" ] && [ -z "$ENV_PX_SET" ]; then
+    if [ -n "$SYS_PX_AUTH" ];   then PX1_WHY="auth"
+    elif [ "$SYS_PX" = "PAC" ]; then PX1_WHY="pac"
+    elif [ -z "$SYS_PX" ];      then PX1_WHY="unknown"
+    else                             PX1="$SYS_PX"
+    fi
+fi
+# EXIT_TRUSTED=0 表示「第 1 项拿到的不是浏览器实际走的出口」。第 3/4/5 项全都拿它当基准，
+# 基准不可信时必须降级为「无法判定」—— 绝不能拿直连出口去比时区 / locale / IPv6 归属后报绿。
+EXIT_TRUSTED=1
+[ -n "$PX1_WHY" ] && EXIT_TRUSTED=0
 line
 
 # ---------- 1. 公网 IPv4 + 地理位置 + 代理标记 ----------
 head_ "1) 公网出口 IP 与地理位置"
 # ip-api 的 line 格式按 fields 顺序逐行返回，无需 JSON 解析器
-resp=$(curl -fsS --max-time 15 \
+# ${PX1:+-x "$PX1"}：只有系统代理接管、且 curl 自己读不到它时才补 —— 否则参数与旧版完全一致。
+# 不补的话，macOS 的 scutil / Linux 的 gsettings 代理 curl 都看不见，这里拿到的会是直连出口
+# （= 你的真实 IP），而第 2/3/4/5 项全都拿它当浏览器侧基准，会一起给出假的「一致 / 未泄露」。
+resp=$(curl -fsS --max-time 15 --connect-timeout 8 ${PX1:+-x "$PX1"} \
   "http://ip-api.com/line/?fields=status,country,countryCode,city,timezone,offset,isp,as,query,proxy,hosting" 2>/dev/null)
 ip_status=""; ip_country=""; ip_cc=""; ip_city=""; ip_tz=""; ip_offset=""; ip_isp=""; ip_as=""
 ip_query=""; ip_proxy=""; ip_hosting=""
@@ -263,6 +372,18 @@ if [ "$ip_status" = "success" ]; then
         info "「未识别」只表示没认出来：既不等于机房，也不等于住宅。别据此判定安全。"
     fi
     # EXIT-CLASS-END
+    # 基准可信度。放在 EXIT-CLASS-END 之外：verify-classifier.sh 会按标记抽取上面那段
+    # 单独执行做跨语言比对，块内引用 $EXIT_TRUSTED 会让它跑不起来。
+    if [ "$EXIT_TRUSTED" != "1" ]; then
+        case "$PX1_WHY" in
+            pac)     warn "上面这个出口是**直连**取得的，不是浏览器实际走的出口 —— 当前是 PAC / 自动配置代理，脚本不执行 PAC 规则，取不到浏览器会用的地址。" ;;
+            auth)    warn "上面这个出口是**直连**取得的，不是浏览器实际走的出口 —— 系统代理配了用户名认证，密码在钥匙串里，只读自查不会去取。" ;;
+            *)       warn "上面这个出口是**直连**取得的，不是浏览器实际走的出口 —— 系统代理已开启，但读不到可用的代理地址。" ;;
+        esac
+        info "curl 不读 macOS 的 scutil / Linux 的 gsettings 代理，只读 http_proxy 等环境变量。"
+        info "因此第 3、4、5 项失去了比较基准，下面会标为「无法判定」而不是给出结论。"
+        info "想让这几项恢复可用：开客户端的 TUN 模式，或把代理写进 http_proxy / https_proxy 环境变量再跑。"
+    fi
 else
     bad "无法获取公网 IP（ip-api 不可达）——检查 VPN 是否在线"
 fi
@@ -304,6 +425,16 @@ EOF
     elif [ "$b_query" = "$ip_query" ]; then
         if [ "$TAKEOVER" = "none" ]; then
             bad "出口 $b_query 与浏览器一致，但当前没有任何接管 —— 两者都是直连，真实 IP 全程暴露"
+        elif [ "$TUN_ROUTED" != "1" ]; then
+            # 「被隧道接管」这句话在非 TUN 下恒为假，与两侧 IP 是否相同无关。
+            # 结构上：TAKEOVER=sysproxy 只在 case "$route_if" 的 *) 分支里被设置，
+            # 而 TUN_ROUTED=1 只在 TUN 分支里被设置 —— 两者互斥。对外路由没走 TUN 网卡，
+            # 就意味着「不认代理的程序」按定义是直连的，不可能被隧道接管。
+            # 两侧 IP 相同只说明代理把 ip-api.com 也放行直连了（规则型客户端很常见），
+            # 或者本机 curl 与浏览器走的是同一条直连路径 —— 都不构成安全结论。
+            warn "出口 $b_query 与浏览器一致，但当前是系统代理 / 局部接管，对外路由没走 TUN —— 无法据此判定这类程序安全"
+            info "非 TUN 下「不认代理的程序」本来就是直连；两侧相同多半是代理对 ip-api.com 走了直连规则。"
+            info "要真正兜住 Claude / Codex 这类程序，只有开客户端的 TUN 模式，或用 ./app-vpn.sh 逐个启动。"
         else
             ok "出口 $b_query 与浏览器一致 —— 不认代理的程序也被隧道接管，Claude/Codex 等不会泄露"
         fi
@@ -337,7 +468,10 @@ line
 # ---------- 3. IPv6 泄露面 ----------
 head_ "3) IPv6 泄露面"
 v6=$(curl -fsS --max-time 8 "https://api64.ipify.org" 2>/dev/null)
-if [ -n "$v6" ] && [[ "$v6" == *:* ]]; then
+if [ -n "$v6" ] && [[ "$v6" == *:* ]] && [ "$EXIT_TRUSTED" != "1" ]; then
+    info "公网 IPv6: ${v6}"
+    warn "无法判定 —— 本项要拿它与「出口 IPv4 的归属」比对，而第 1 项的出口是直连取得的（详见第 1 项的说明）"
+elif [ -n "$v6" ] && [[ "$v6" == *:* ]]; then
     # 关键：有公网 IPv6 不等于泄露。若它归属与出口一致，说明 IPv6 也走了隧道（是出口的 v6）；
     # 只有当它归属你的真实 ISP（与出口国不一致）时，才是绕过 VPN 的真泄露。
     v6json=$(curl -fsS --max-time 8 "http://ip-api.com/json/$v6?fields=status,countryCode,country,as" 2>/dev/null)
@@ -380,7 +514,10 @@ else
 fi
 [ -z "$sys_tz" ] && sys_tz="(未知)"
 info "系统时区   : $sys_tz ($(fmt_utc "$sys_offset"))  —— 浏览器 JS 会据此报时区"
-if [ "$ip_status" = "success" ]; then
+if [ "$ip_status" = "success" ] && [ "$EXIT_TRUSTED" != "1" ]; then
+    warn "无法判定 —— 第 1 项的出口是直连取得的，拿它比时区没有意义（详见第 1 项的说明）"
+    info "这一项恰恰是平台判定「你在用 VPN」的头号依据，所以宁可不给结论，也不给一个假的「一致」。"
+elif [ "$ip_status" = "success" ]; then
     info "IP 端时区  : $ip_tz ($(fmt_utc "$ip_offset"))"
     if [ "$sys_offset" -eq "$ip_offset" ]; then
         ok "时区一致 —— 浏览器时区与出口 IP 匹配"
@@ -397,7 +534,9 @@ line
 head_ "5) 语言 / locale 一致性"
 sys_lang=${LANG:-未设置}
 info "系统区域    : $sys_lang"
-if [ -n "$ip_cc" ] && [ "$ip_status" = "success" ]; then
+if [ "$ip_status" = "success" ] && [ "$EXIT_TRUSTED" != "1" ]; then
+    warn "无法判定 —— 第 1 项的出口是直连取得的，不知道浏览器实际落在哪个国家（详见第 1 项的说明）"
+elif [ -n "$ip_cc" ] && [ "$ip_status" = "success" ]; then
     if [[ "$sys_lang" == zh_CN* ]] && [ "$ip_cc" != "CN" ]; then
         warn "浏览器默认语言可能是中文，而出口在 $ip_country —— 次级指纹信号"
         info "修复：用 browse-vpn.sh 以 --lang 覆盖浏览器语言；桌面应用/CLI 用 app-vpn.sh 注入 LANG（均不改系统）。"
