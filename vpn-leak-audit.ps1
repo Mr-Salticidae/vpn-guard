@@ -20,6 +20,56 @@ function Warn($m){ Write-Host "  [WARN] $m" -ForegroundColor Yellow }
 function Bad($m){ Write-Host "  [FAIL] $m" -ForegroundColor Red }
 function Info($m){ Write-Host "  $m" -ForegroundColor Gray }
 
+# ==== 出口归属判定：消费级运营商 ASN 名单 ====================================
+# 只存号码，不存机构名 —— 机构名由上面那行 "ISP :" 打印，重复存一份只多一处腐坏点。
+# 号码集合与 auto-select-node.ps1 顶部那张表同源，由 verify-unix.sh 机械比对。
+# 名单漏掉一条的后果只是少一句「住宅」的好消息（降级为「未识别」），
+# 不可能变成误报安全 —— 这是本文件敢内联一份副本、而不依赖任何外部库文件的全部理由。
+# 两条会「告警」的判据（hosting=true / 32 位 ASN）完全不读这张表。
+# 维护约束：BEGIN/END 之间除 ASN 号外不得出现任何数字。
+# ASN-TABLE-BEGIN
+$ResiAsnRaw = @'
+3462 4780 9924 17421 24158
+4760 9269 9304 4515 9908 17444
+4609
+4713 2516 17676 2527 2518 4685 2497 9605 9824 17511 18126 7679 138384
+4766 9318 3786 17858 9644
+3758 9506 4657 4773
+4788
+9930 17552 45758
+7713 23693
+9299 4775
+45899 7552 18403
+55836 24560 9829 55577 17488
+4134 4837 9808 4808
+7922 7018 701 6167 20115 11427 22773 21928 209 5650 6128
+812 577 852
+2856 5607 5089 13285 12576 13037 206067
+3320 3209 6805 8422
+3215 12322 15557
+3269 12874
+3352 6739
+1136
+6830
+3301
+1221 7474 4739
+4771
+'@
+# ASN-TABLE-END
+$ResiAsn = @{}
+foreach ($a in ($ResiAsnRaw -split '[^0-9]+')) { if ($a) { $ResiAsn[$a] = $true } }
+# 同目录 residential-asn.txt（可选，与 auto-select-node.ps1 读同一个文件、同一条正则）。
+# 缺失 = 只用内置名单，功能不减；单独拷走本文件的用户不会踩到任何坑。
+# $PSScriptRoot 在被 dot-source 时为空，必须先判空再 Join-Path ——
+# 顶部的 SilentlyContinue 会把 Test-Path '' 的报错吃掉，只能靠显式守卫。
+$ResiFile = ''
+if ($PSScriptRoot) { $ResiFile = Join-Path $PSScriptRoot 'residential-asn.txt' }
+if ($ResiFile -and (Test-Path $ResiFile)) {
+    foreach ($l in @(Get-Content $ResiFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+        if ($l -match '^\s*(?:AS)?(\d+)\s*(?:#\s*(.*?))?\s*$') { $ResiAsn[$Matches[1]] = $true }
+    }
+}
+
 # DNS 泄露主动实测：对随机子域发起真实解析，回查哪些解析器应答（含归属国/ASN）。
 # 用 bash.ws（dnsleaktest.com 官方 CLI 同源）的免费 API，无需自建权威 DNS。
 function Invoke-DnsLeakTest($exitCc, $exitName) {
@@ -87,8 +137,13 @@ $routeIf = $null
 try { $routeIf = (Find-NetRoute -RemoteIPAddress 1.1.1.1 -ErrorAction Stop).InterfaceAlias | Select-Object -First 1 } catch {}
 $reg = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
 $TakeoverMode = 'none'
+# $TunRouted：严格版 —— 只有「TUN 网卡存在且对外路由确实走它」才为真。
+# 下面那个 elseif 里 $TakeoverMode 同样会变成 'tun'（网卡在，但路由没走它），
+# 第 2 项的出口轮换判定绝不能用那个宽松值，否则会把真泄露读成轮换。
+$TunRouted = $false
 if ($tunAdapters.Count -gt 0 -and $routeIf -and ($tunAdapters.Name -contains $routeIf)) {
     $TakeoverMode = 'tun'
+    $TunRouted = $true
     Ok ("TUN 模式（{0}）—— 全局流量（含 UDP/WebRTC）均被接管" -f $routeIf)
 } elseif ($tunAdapters.Count -gt 0) {
     $TakeoverMode = 'tun'
@@ -115,7 +170,31 @@ if ($ipapi -and $ipapi.status -eq 'success') {
     Info ("ISP       : {0}" -f $ipapi.isp)
     Info ("IP 时区   : {0} (UTC{1:+0;-0}:00)" -f $ipapi.timezone, ($ipapi.offset/3600))
     if ($ipapi.proxy)   { Warn "该 IP 被标记为 proxy —— 部分平台会据此拦截" } else { Ok "未被标记为 proxy" }
-    if ($ipapi.hosting) { Warn "该 IP 被标记为 hosting/机房 —— 高风控平台常拦截机房 IP" } else { Ok "未被标记为机房 IP（读起来像住宅/普通 ISP）" }
+    # ---- 出口归属（住宅/消费级 vs 机房/主机商）----
+    # 旧版仅凭 ip-api 的 hosting=false 就写「读起来像住宅/普通 ISP」，2026-08-19 实测是错的：
+    # AS131939 IPS INC / AS131642 Pittqiao / AS209642 Mejiro 三家小主机商 hosting 全是 false。
+    # 现在三态，且「未识别」是默认值：判据不足时只说不知道，绝不说安全。
+    # 注：$exitAsnNum 与第 3 项的 $exitAsn（形如 "AS14061" 的字符串，用于 v4/v6 同 ASN 比对）
+    #     是两个不同的东西，别「统一」它们 —— 会破掉 IPv6 误报防护。
+    #     用 [long] 不用 [int]：ASN 空间到 4294967295，[int] 会溢出且被顶部的 SilentlyContinue 静默吃掉。
+    $exitAsnNum = 0
+    if ("$($ipapi.as)" -match '^\s*AS(\d+)') { $exitAsnNum = [long]$Matches[1] }
+    $ExitResiHit = ($exitAsnNum -gt 0 -and $ResiAsn.ContainsKey([string]$exitAsnNum))
+    if ($ipapi.hosting) {
+        Warn ("出口归属  : 机房/主机商 —— ip-api 直接标记为 hosting（{0}）。高风控平台常拦截机房 IP" -f $(if ($ipapi.as) { $ipapi.as } else { '未知 ASN' }))
+        if ($ExitResiHit) { Info "该 ASN 同时在消费级运营商名单里 —— 多半落在该运营商自营的 IDC 段，仍按机房看待。" }
+    } elseif ($exitAsnNum -le 0) {
+        Info "出口归属  : 未识别 —— ip-api 没返回 AS 号，无判据。不能据此认为出口安全。"
+    } elseif ($ExitResiHit) {
+        Ok ("出口归属  : 住宅/消费级 —— AS{0} 在已知消费级运营商名单中" -f $exitAsnNum)
+    } elseif ($exitAsnNum -ge 65536) {
+        Warn ("出口归属  : 推断为机房/主机商 —— AS{0} 是 32 位 ASN（2014 年后才发放；家宽运营商都在那之前就拿到了号段）" -f $exitAsnNum)
+        Info "ip-api 的 hosting=false 只代表它库里没这条记录，不代表这是住宅 IP。"
+        Info ("若你确认 AS{0} 是当地家宽运营商，把它写进同目录 residential-asn.txt（每行一条 AS 号）即可。" -f $exitAsnNum)
+    } else {
+        Info ("出口归属  : 未识别 —— AS{0} 既不在消费级运营商名单中，ip-api 也未标记为机房。" -f $exitAsnNum)
+        Info "「未识别」只表示没认出来：既不等于机房，也不等于住宅。别据此判定安全。"
+    }
 } else {
     Bad "无法获取公网 IP（ip-api 不可达）——检查 VPN 是否在线"
 }
@@ -142,7 +221,8 @@ if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
 } else {
     # --noproxy "*" 让 curl 忽略一切代理设置（含环境变量），精确复刻「完全不认代理的程序」的行为。
     # curl.exe 本来就不读 Windows 的 WinINET 注册表代理，这一点与 Node/Electron 主进程一致。
-    $bareRaw = & curl.exe -s --max-time 12 --noproxy "*" "http://ip-api.com/json/?fields=status,query,country,countryCode,isp" 2>$null
+    # 加 as 字段：与本项原有请求同一次调用，零额外配额，用于把「出口轮换」与「真泄露」区分开。
+    $bareRaw = & curl.exe -s --max-time 12 --noproxy "*" "http://ip-api.com/json/?fields=status,query,country,countryCode,isp,as" 2>$null
     $bare = try { "$bareRaw" | ConvertFrom-Json } catch { $null }
     if (-not $bare -or $bare.status -ne 'success') {
         Warn "实测请求失败 —— 若确实完全不通，说明这类程序在当前环境根本连不上网（也是一种信号）"
@@ -153,6 +233,23 @@ if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
             Ok ("出口 {0} 与浏览器一致 —— 不认代理的程序也被隧道接管，Claude/Codex 等不会泄露" -f $bare.query)
         }
     } else {
+        # 出口轮换 vs 真泄露。TUN 模式下 curl --noproxy 同样走隧道（--noproxy 只关代理设置，
+        # 不改路由），两次观测落在同一出口池的不同成员上就会 IP 不同 —— 那不是泄露。
+        # 判据与第 3 项对 IPv6 用的完全一致：同 ASN 时以 ASN 为准。
+        # 只在 $TunRouted 为真时才敢这么判：系统代理 / PAC / 无接管时 curl 本来就是直连，
+        # 两条路本就不同，此时 IP 不同就是真泄露，必须保持红色。
+        $bareAsn = ''
+        if ($bare.as -and ("$($bare.as)" -match '^\s*AS(\d+)')) { $bareAsn = $Matches[1] }
+        $exitAsnCmp = ''
+        if ($ipapi.as -and ("$($ipapi.as)" -match '^\s*AS(\d+)')) { $exitAsnCmp = $Matches[1] }
+      if ($TunRouted -and $bareAsn -and $exitAsnCmp -and $bareAsn -eq $exitAsnCmp) {
+        Warn ("出口在轮换：浏览器侧 {0}、不认代理的程序侧 {1}，两者同属 AS{2} —— 同一出口池的不同成员，不是泄露" -f `
+              $ipapi.query, $bare.query, $exitAsnCmp)
+        Info "当前节点背后是负载均衡 / 多出口池：出口被大量账号共享（平台按 IP 聚类做关联判定），"
+        Info "且会话 IP 会中途跳变 —— Claude / ChatGPT 这类平台会把它当成异常信号。"
+        Info "另注意：第 3、4、5、8 项都是对「第 1 项那一瞬的出口」的快照 —— 出口会变，就说明那些结论只对那一次成立。"
+        Info "修复：在客户端里选一个固定节点，别用「自动选择 / 负载均衡 / fallback」策略组。"
+      } else {
         Bad ("不认代理的程序直连出口 {0}（{1} / {2}），与浏览器出口 {3}（{4}）不一致 —— 真实 IP 正在泄露！" -f `
              $bare.query, $bare.country, $bare.isp, $ipapi.query, $ipapi.country)
         Info "受影响：Codex CLI、Claude Code CLI、Claude/ChatGPT 桌面版的 Node 主进程、各类自动更新与遥测。"
@@ -161,6 +258,7 @@ if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
         if ($envProxyLines) {
             Info "注：你已设了代理环境变量 —— 认这些变量的程序（多数 Node/Rust CLI）不受影响，不认的仍在泄露。"
         }
+      }
     }
 }
 Line
@@ -174,7 +272,8 @@ if ($v6 -and $v6.ip -match ':') {
     # 只有归属你的真实 ISP（与出口国不一致）才是绕过 VPN 的真泄露。
     $v6info = try { Invoke-RestMethod -Uri ("http://ip-api.com/json/{0}?fields=status,countryCode,country,as" -f $v6.ip) -TimeoutSec 8 } catch { $null }
     $exitCc = if ($ipapi -and $ipapi.status -eq 'success') { $ipapi.countryCode } else { "" }
-    # "AS14061 DigitalOcean, LLC" → "AS14061"
+    # "AS14061 DigitalOcean, LLC" → "AS14061"。刻意保留 "AS" 前缀，只用于 v4/v6 同 ASN 比对；
+    # 与第 1 项的 $exitAsnNum（纯数字 long）不是一回事，别合并，会破掉下面的 IPv6 误报防护。
     $exitAsn = if ($ipapi -and $ipapi.status -eq 'success' -and $ipapi.as) { ("$($ipapi.as)".Trim() -split '\s+')[0] } else { "" }
     $v6Asn   = if ($v6info -and $v6info.as) { ("$($v6info.as)".Trim() -split '\s+')[0] } else { "" }
     if ($v6info -and $v6info.status -eq 'success' -and $exitCc -and $v6info.countryCode -eq $exitCc) {

@@ -333,7 +333,9 @@ function Get-ExitClass {
     }
 
     if ("$AsField" -match '^\s*AS(\d+)\s*(.*)$') {
-        $r.asn   = [int]$Matches[1]
+        # [long] 而非 [int]：ASN 空间到 4294967295，超过 [int] 上限会抛异常并被脚本头部的
+        # SilentlyContinue 静默吃掉，$r.asn 保持 0 从而退化成 unknown（方向安全，但白白丢掉判据）。
+        $r.asn   = [long]$Matches[1]
         $r.asOrg = $Matches[2].Trim()
     }
 

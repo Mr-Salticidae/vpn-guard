@@ -54,6 +54,53 @@ done
 
 AUDIT_DIR=$(cd "$(dirname "$0")" && pwd)
 
+# ==== 出口归属判定：消费级运营商 ASN 名单 ====================================
+# 只存号码，不存机构名 —— 机构名由 "ISP :" 那行打印，重复存一份只多一处腐坏点。
+# 号码集合与 auto-select-node.ps1 / vpn-leak-audit.ps1 同源，由 verify-unix.sh 机械比对。
+# 名单漏一条只损失一句「住宅」的好消息（降级为「未识别」），不可能变成误报安全 ——
+# 这是本文件敢内联一份副本、而不依赖任何外部库文件的全部理由。
+# 两条会「告警」的判据（hosting=true / 32 位 ASN）完全不读这张表。
+# 维护约束：BEGIN/END 之间除 ASN 号外不得出现任何数字。
+# ASN-TABLE-BEGIN
+RESI_ASN="
+3462 4780 9924 17421 24158
+4760 9269 9304 4515 9908 17444
+4609
+4713 2516 17676 2527 2518 4685 2497 9605 9824 17511 18126 7679 138384
+4766 9318 3786 17858 9644
+3758 9506 4657 4773
+4788
+9930 17552 45758
+7713 23693
+9299 4775
+45899 7552 18403
+55836 24560 9829 55577 17488
+4134 4837 9808 4808
+7922 7018 701 6167 20115 11427 22773 21928 209 5650 6128
+812 577 852
+2856 5607 5089 13285 12576 13037 206067
+3320 3209 6805 8422
+3215 12322 15557
+3269 12874
+3352 6739
+1136
+6830
+3301
+1221 7474 4739
+4771
+"
+# ASN-TABLE-END
+# 同目录 residential-asn.txt（可选，与 auto-select-node.ps1 读同一个文件、同一套行格式）。
+# bash 3.2 没有关联数组：名单就是一个空格分隔的字符串，用 case 做整词匹配
+# （两端补空格，防止 3462 被 346 误命中）。文件缺失 = 只用内置名单，功能不减。
+# tr -d '\r' 兜底在 Windows 上编辑过该文件的用户。
+if [ -f "$AUDIT_DIR/residential-asn.txt" ]; then
+    RESI_ASN="$RESI_ASN $(tr -d '\r' < "$AUDIT_DIR/residential-asn.txt" \
+        | grep -E '^[[:space:]]*(AS)?[0-9]+[[:space:]]*(#.*)?$' \
+        | sed 's/^[^0-9]*\([0-9][0-9]*\).*$/\1/' | tr '\n' ' ')"
+fi
+RESI_ASN=" $(printf '%s' "$RESI_ASN" | tr '\n' ' ') "
+
 # ---- DNS 泄露主动实测：对随机子域发起真实解析，回查是哪些解析器应答（含归属国/ASN）----
 # 用 bash.ws（dnsleaktest.com 官方 CLI 同源）的免费 API，无需自建权威 DNS。
 dns_leak_test() {
@@ -146,9 +193,12 @@ case "$(uname)" in
 esac
 
 TAKEOVER="none"
+# TUN_ROUTED：严格版 —— 只有「对外路由确实走 TUN 网卡」才为真。第 2 项的出口轮换
+# 判定只认这个值：系统代理下 curl --noproxy 是直连，IP 不同就是真泄露，不能读成轮换。
+TUN_ROUTED=0
 case "$route_if" in
     utun*|tun*|tap*|wg*|Meta*|meta*|mihomo*|sing*)
-        TAKEOVER="tun"
+        TAKEOVER="tun"; TUN_ROUTED=1
         ok "TUN 模式（对外路由走 ${route_if}）—— 全局流量（含 UDP/WebRTC）均被接管" ;;
     *)
         if [ -n "$sysproxy" ]; then
@@ -183,7 +233,34 @@ if [ "$ip_status" = "success" ]; then
     info "ISP       : $ip_isp"
     info "IP 时区   : $ip_tz ($(fmt_utc "$ip_offset"))"
     if [ "$ip_proxy" = "true" ];   then warn "该 IP 被标记为 proxy —— 部分平台会据此拦截"; else ok "未被标记为 proxy"; fi
-    if [ "$ip_hosting" = "true" ]; then warn "该 IP 被标记为 hosting/机房 —— 高风控平台常拦截机房 IP"; else ok "未被标记为机房 IP（读起来像住宅/普通 ISP）"; fi
+    # ---- 出口归属（住宅/消费级 vs 机房/主机商）----
+    # 旧版仅凭 ip-api 的 hosting=false 就写「读起来像住宅/普通 ISP」，2026-08-19 实测是错的：
+    # AS131939 IPS INC / AS131642 Pittqiao / AS209642 Mejiro 三家小主机商 hosting 全是 false。
+    # 三态，且「未识别」是默认值：判据不足时只说不知道，绝不说安全。
+    # 变量名必须用 exit_asnum（纯数字）—— 第 3 项已有 exit_asn 存 "AS14061" 这种带前缀的
+    # 字符串做 v4/v6 同 ASN 比对，bash 没有作用域，撞名会破掉 IPv6 误报防护。
+    exit_asnum=$(printf '%s' "$ip_as" | sed -n 's/^AS\([0-9][0-9]*\).*$/\1/p')
+    resi_hit=0
+    if [ -n "$exit_asnum" ]; then
+        case "$RESI_ASN" in *" $exit_asnum "*) resi_hit=1 ;; esac
+    fi
+    if [ "$ip_hosting" = "true" ]; then
+        warn "出口归属  : 机房/主机商 —— ip-api 直接标记为 hosting（${ip_as:-未知 ASN}）。高风控平台常拦截机房 IP"
+        if [ "$resi_hit" = "1" ]; then
+            info "该 ASN 同时在消费级运营商名单里 —— 多半落在该运营商自营的 IDC 段，仍按机房看待。"
+        fi
+    elif [ -z "$exit_asnum" ]; then
+        info "出口归属  : 未识别 —— ip-api 没返回 AS 号，无判据。不能据此认为出口安全。"
+    elif [ "$resi_hit" = "1" ]; then
+        ok "出口归属  : 住宅/消费级 —— AS${exit_asnum} 在已知消费级运营商名单中"
+    elif [ "$exit_asnum" -ge 65536 ]; then
+        warn "出口归属  : 推断为机房/主机商 —— AS${exit_asnum} 是 32 位 ASN（2014 年后才发放；家宽运营商都在那之前就拿到了号段）"
+        info "ip-api 的 hosting=false 只代表它库里没这条记录，不代表这是住宅 IP。"
+        info "若你确认 AS${exit_asnum} 是当地家宽运营商，把它写进同目录 residential-asn.txt（每行一条 AS 号）即可。"
+    else
+        info "出口归属  : 未识别 —— AS${exit_asnum} 既不在消费级运营商名单中，ip-api 也未标记为机房。"
+        info "「未识别」只表示没认出来：既不等于机房，也不等于住宅。别据此判定安全。"
+    fi
 else
     bad "无法获取公网 IP（ip-api 不可达）——检查 VPN 是否在线"
 fi
@@ -208,11 +285,15 @@ if [ "$ip_status" != "success" ]; then
 else
     # --noproxy '*' 让 curl 忽略一切代理设置（含环境变量），精确复刻「完全不认代理的程序」的行为
     bare=$(curl -fsS --max-time 12 --noproxy '*' \
-      "http://ip-api.com/line/?fields=status,country,countryCode,isp,query" 2>/dev/null)
-    b_status=""; b_country=""; b_cc=""; b_isp=""; b_query=""
+      "http://ip-api.com/line/?fields=status,country,countryCode,isp,as,query" 2>/dev/null)
+    # /line/ 按 ip-api 的固定字段序返回，与请求参数顺序无关；as 排在 isp 之后、query 之前。
+    # 已用打乱的请求顺序 A/B 对照实测确认：6 行 = status / country / countryCode / isp / as / query。
+    # 改字段前务必重测，位置读取链串位是静默错误。
+    b_status=""; b_country=""; b_cc=""; b_isp=""; b_as=""; b_query=""
     if [ -n "$bare" ]; then
         # shellcheck disable=SC2034
-        { read -r b_status; read -r b_country; read -r b_cc; read -r b_isp; read -r b_query; } <<EOF
+        { read -r b_status; read -r b_country; read -r b_cc; read -r b_isp
+          read -r b_as; read -r b_query; } <<EOF
 $bare
 EOF
     fi
@@ -225,11 +306,28 @@ EOF
             ok "出口 $b_query 与浏览器一致 —— 不认代理的程序也被隧道接管，Claude/Codex 等不会泄露"
         fi
     else
-        bad "不认代理的程序直连出口 ${b_query}（$b_country / ${b_isp}），与浏览器出口 ${ip_query}（${ip_country}）不一致 —— 真实 IP 正在泄露！"
-        info "受影响：Codex CLI、Claude Code CLI、Claude/ChatGPT 桌面版的 Node 主进程、各类自动更新与遥测。"
-        info "修复 A（推荐，一劳永逸）：开客户端的 TUN 模式，全局接管所有程序。"
-        info "修复 B（按应用）：用 ./app-vpn.sh 启动它们（进程级注入 HTTPS_PROXY + TZ，不改任何系统设置）。"
-        [ -n "$env_proxy" ] && info "注：你已设了代理环境变量 —— 认这些变量的程序（多数 Node/Rust CLI）不受影响，不认的仍在泄露。"
+        # 出口轮换 vs 真泄露。TUN 模式下 curl --noproxy 同样走隧道（--noproxy 只关代理设置，
+        # 不改路由），两次观测落在同一出口池的不同成员上就会 IP 不同 —— 那不是泄露。
+        # 判据与第 3 项对 IPv6 用的完全一致：同 ASN 时以 ASN 为准。
+        # 只在 TUN_ROUTED=1 时才敢这么判：系统代理 / 无接管时 curl 本来就是直连，
+        # 两条路本就不同，此时 IP 不同就是真泄露，必须保持红色。
+        bare_asn=""
+        case "$b_as" in AS[0-9]*) bare_asn=${b_as#AS}; bare_asn=${bare_asn%% *} ;; esac
+        exit_asncmp=""
+        case "$ip_as" in AS[0-9]*) exit_asncmp=${ip_as#AS}; exit_asncmp=${exit_asncmp%% *} ;; esac
+        if [ "$TUN_ROUTED" = "1" ] && [ -n "$bare_asn" ] && [ "$bare_asn" = "$exit_asncmp" ]; then
+            warn "出口在轮换：浏览器侧 ${ip_query}、不认代理的程序侧 ${b_query}，两者同属 AS${exit_asncmp} —— 同一出口池的不同成员，不是泄露"
+            info "当前节点背后是负载均衡 / 多出口池：出口被大量账号共享（平台按 IP 聚类做关联判定），"
+            info "且会话 IP 会中途跳变 —— Claude / ChatGPT 这类平台会把它当成异常信号。"
+            info "另注意：第 3、4、5、8 项都是对「第 1 项那一瞬的出口」的快照 —— 出口会变，就说明那些结论只对那一次成立。"
+            info "修复：在客户端里选一个固定节点，别用「自动选择 / 负载均衡 / fallback」策略组。"
+        else
+            bad "不认代理的程序直连出口 ${b_query}（$b_country / ${b_isp}），与浏览器出口 ${ip_query}（${ip_country}）不一致 —— 真实 IP 正在泄露！"
+            info "受影响：Codex CLI、Claude Code CLI、Claude/ChatGPT 桌面版的 Node 主进程、各类自动更新与遥测。"
+            info "修复 A（推荐，一劳永逸）：开客户端的 TUN 模式，全局接管所有程序。"
+            info "修复 B（按应用）：用 ./app-vpn.sh 启动它们（进程级注入 HTTPS_PROXY + TZ，不改任何系统设置）。"
+            [ -n "$env_proxy" ] && info "注：你已设了代理环境变量 —— 认这些变量的程序（多数 Node/Rust CLI）不受影响，不认的仍在泄露。"
+        fi
     fi
 fi
 line
@@ -255,7 +353,10 @@ if [ -n "$v6" ] && [[ "$v6" == *:* ]]; then
         # 地理定位不一致（DigitalOcean / Vultr 等云厂商常见）。只比国家会在这里误报成"泄露"。
         ok "公网 IPv6: ${v6}（${v6as}）—— 与出口同属 ${exit_asn}，是出口节点自己的 IPv6，未泄露"
         info "注：ip-api 把该 IPv6 定位在 ${v6country}、把出口 IPv4 定位在 $ip_country —— 同 ASN 时以 ASN 为准，避免误报。"
-    elif [ -n "$up_v6cc" ]; then
+    # 必须同时要求 up_exit 非空：第 1 项的 ip-api 调用失败（网络抖动或 45 次/分限流）时
+    # ip_country / ip_as 都是空，只凭 up_v6cc 就打红字会宣称一个不存在的 IPv6 泄露。
+    # .ps1 侧一直有这道守卫，这里补齐，两版行为对齐。
+    elif [ -n "$up_exit" ] && [ -n "$up_v6cc" ]; then
         bad "公网 IPv6: $v6 归属 ${v6country}（${v6as}），与出口 ${ip_country}（${ip_as:-未知 ASN}）既不同国也不同 ASN —— IPv6 绕过 VPN 暴露真实位置！"
         info "修复：关闭物理网卡的 IPv6，或让 VPN(TUN) 接管 IPv6 隧道。"
     else

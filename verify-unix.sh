@@ -110,6 +110,46 @@ else
   note "无 Chrome 或缺检测页，跳过 WebRTC 冒烟"
 fi
 
+echo; echo "==== 11) 出口归属 ASN 名单三方一致性 ===="
+# 这是全文件唯一与平台无关的检查 —— Windows 上用 Git Bash 也能跑，建议提交前跑一次。
+# 三份拷贝解决不了的问题：每个脚本都要能被单独拷走直接跑。所以内联了 93 个整数的三份数据，
+# 但内联不等于重复 —— 只有重复且有出入才是问题。
+# 约束：ASN-TABLE-BEGIN 与 ASN-TABLE-END 之间除 ASN 号外不得出现任何数字，说明性文字写在 BEGIN 之上。
+_asn_sel() { awk '/\$script:ResidentialAsn = @\{/,/^\}/' "$1" 2>/dev/null \
+               | grep -o "'[0-9][0-9]*'" | tr -d "'" | sort -n | uniq; }
+_asn_blk() { awk '/ASN-TABLE-BEGIN/,/ASN-TABLE-END/' "$1" 2>/dev/null \
+               | grep -o '[0-9][0-9]*' | sort -n | uniq; }
+_ta=$(_asn_sel ./auto-select-node.ps1)
+_tb=$(_asn_blk ./vpn-leak-audit.ps1)
+_tc=$(_asn_blk ./vpn-leak-audit.sh)
+_tn=$(printf '%s\n' "$_ta" | grep -c .)
+drift_fail=0
+if [ "$_tn" -lt 50 ]; then
+    no "从 auto-select-node.ps1 只抽到 $_tn 个 ASN（预期 90+）—— 抽取头子被改过，无法判定"
+    drift_fail=1
+elif [ "$_ta" = "$_tb" ] && [ "$_tb" = "$_tc" ]; then
+    ok "出口归属 ASN 名单三方一致（$_tn 条）"
+else
+    no "出口归属 ASN 名单已漂移 —— 三份拷贝不再是同一个集合"
+    _t1=$(mktemp); _t2=$(mktemp)
+    printf '%s\n' "$_ta" > "$_t1"; printf '%s\n' "$_tb" > "$_t2"
+    [ "$_ta" != "$_tb" ] && { note "auto-select-node.ps1 vs vpn-leak-audit.ps1:"; diff "$_t1" "$_t2"; }
+    printf '%s\n' "$_tb" > "$_t1"; printf '%s\n' "$_tc" > "$_t2"
+    [ "$_tb" != "$_tc" ] && { note "vpn-leak-audit.ps1 vs vpn-leak-audit.sh:"; diff "$_t1" "$_t2"; }
+    rm -f "$_t1" "$_t2"
+    drift_fail=1
+fi
+
 echo; echo "============================================"
 echo "  结果：PASS=$pass  FAIL=$fail"
 [ "$fail" -eq 0 ] && echo "  ✅ 平台相关部分全部通过" || echo "  ⚠ 有失败项，请把上面 [FAIL] 行反馈给作者"
+
+# 退出码语义：本脚本绝大多数检查依赖环境（Chrome 是否存在、能否出网、DNS 上游），
+# 在 CI 里失败不代表代码有问题，所以整体保持「信息性」、不因它们返回非零。
+# 唯独第 11 项例外：它是纯文本比对，与平台、网络、时间都无关，只要漂移就一定是代码问题。
+# 因此只让它成为硬失败 —— 这样 CI 里那一步才真的是道闸门，而不只是往日志里打一行字。
+if [ "$drift_fail" -ne 0 ]; then
+    echo "  ✖ ASN 名单漂移属于硬失败（其余检查依赖环境，仍为信息性）"
+    exit 1
+fi
+exit 0
