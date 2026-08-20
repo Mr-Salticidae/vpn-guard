@@ -11,7 +11,7 @@
   只读检查，不修改任何系统设置。
 #>
 
-param([switch]$NoDnsLeak, [switch]$NoSpeedTest)
+param([switch]$NoDnsLeak, [switch]$NoSpeedTest, [string]$Export = '')
 
 $ErrorActionPreference = 'SilentlyContinue'
 function Line($c='-'){ Write-Host ($c * 60) -ForegroundColor DarkGray }
@@ -447,5 +447,90 @@ if ($NoSpeedTest) {
 Line '='
 Write-Host " 自查完成。红色=需处理，黄色=注意，绿色=通过。" -ForegroundColor Cyan
 Write-Host ""
+
+# ---------- 结构化导出（-Export，用于跨机器对照）----------
+# 设计前提：这份文件是要发给别人的，所以默认脱敏，且只导出「对照需要的」维度。
+# 刻意不导出：完整出口 IP（只留 /24）、完整 IPv6、DNS 服务器地址、代理环境变量的值
+# （可能含凭据）、注册表里的代理地址、机器名 / 用户名 / 任何绝对路径。
+# 系统时区只导出「与出口的差值」而非时区名 —— 时区名会直接暴露所在地。
+if ($Export) {
+    function MaskIp($ip) {
+        if ("$ip" -match '^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$') { return "$($Matches[1]).x" }
+        return ''
+    }
+    $ok = ($ipapi -and $ipapi.status -eq 'success')
+
+    $exitClass = 'n/a'
+    if ($ok) {
+        if     ($ipapi.hosting)          { $exitClass = 'datacenter(hosting标记)' }
+        elseif ($exitAsnNum -le 0)       { $exitClass = 'unknown(无AS号)' }
+        elseif ($ExitResiHit)            { $exitClass = 'residential' }
+        elseif ($exitAsnNum -ge 65536)   { $exitClass = 'datacenter(32位ASN推断)' }
+        else                             { $exitClass = 'unknown' }
+    }
+
+    $cliVerdict = 'n/a'
+    if ($ok -and $bare -and $bare.status -eq 'success') {
+        if     ($bare.query -ne $ipapi.query -and $TunRouted) { $cliVerdict = '出口轮换(同ASN)或泄露' }
+        elseif ($bare.query -ne $ipapi.query)                 { $cliVerdict = '泄露' }
+        elseif ($TakeoverMode -eq 'none')                     { $cliVerdict = '全程直连' }
+        elseif (-not $TunRouted)                              { $cliVerdict = '无法判定(非TUN)' }
+        else                                                  { $cliVerdict = '已被隧道接管' }
+    }
+
+    $tzDelta = 'n/a'
+    if ($ok) { $tzDelta = [int](($ipapi.offset - $sysOffset) / 3600) }
+
+    $v6Verdict = '无公网IPv6'
+    if ($v6 -and $v6.ip -match ':') {
+        if     ($v6info -and $exitCc -and $v6info.countryCode -eq $exitCc) { $v6Verdict = '未泄露(同国)' }
+        elseif ($v6info -and $exitAsn -and $v6Asn -eq $exitAsn)            { $v6Verdict = '未泄露(同ASN)' }
+        elseif ($v6info -and $v6info.status -eq 'success')                 { $v6Verdict = '疑似泄露' }
+        else                                                               { $v6Verdict = '有IPv6但无法判定' }
+    }
+
+    $lines = @(
+        '# vpn-guard 环境对照报告（已脱敏）'
+        '# 本文件不含完整 IP、IPv6、DNS 地址、代理凭据、机器名或路径。'
+        ('生成时间          : {0}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm'))
+        ('报告格式版本      : 1')
+        ''
+        '## 一、网络环境（脚本实测）'
+        ('流量接管方式      : {0}' -f $TakeoverMode)
+        ('对外路由确实走TUN : {0}' -f $(if ($TunRouted) { '是' } else { '否' }))
+        ('出口国            : {0}' -f $(if ($ok) { $ipapi.countryCode } else { 'n/a' }))
+        ('出口网段          : {0}' -f $(if ($ok) { MaskIp $ipapi.query } else { 'n/a' }))
+        ('出口 ASN          : {0}' -f $(if ($ok -and $exitAsnNum -gt 0) { "AS$exitAsnNum" } else { 'n/a' }))
+        ('出口 ISP          : {0}' -f $(if ($ok) { $ipapi.isp } else { 'n/a' }))
+        ('出口归属判定      : {0}' -f $exitClass)
+        ('被标记为 proxy    : {0}' -f $(if ($ok -and $ipapi.proxy) { '是' } else { '否' }))
+        ('CLI/桌面应用出口  : {0}' -f $cliVerdict)
+        ('时区差(出口-系统) : {0} 小时' -f $tzDelta)
+        ('系统区域          : {0}' -f $sysLang)
+        ('IPv6              : {0}' -f $v6Verdict)
+        ('代理环境变量      : {0}' -f $(if ($envProxyLines) { '已设置(值不导出)' } else { '未设置' }))
+        ''
+        '## 二、账号与使用习惯（需人工填写 —— 这部分才是关键变量）'
+        '# 脚本测不到这些，但按已有结论，它们比上面任何一项都更能决定账号存活。'
+        '# 请如实填写，不确定就写「不清楚」。'
+        ('被封过吗(次数)    : {0}' -f '__待填__')
+        ('最近一次被封时间  : {0}' -f '__待填__')
+        ('账号来源          : {0}' -f '__待填__  # 自己注册 / 别人给的 / 买的 / 多人合租')
+        ('账号大概注册年份  : {0}' -f '__待填__')
+        ('注册用邮箱        : {0}' -f '__待填__  # 自己长期在用的 / 为注册临时建的')
+        ('是否与他人共用    : {0}' -f '__待填__')
+        ('是否绑过支付方式  : {0}' -f '__待填__  # 没绑 / 绑了(哪国的卡)')
+        ('客户端节点策略    : {0}' -f '__待填__  # 固定一个节点 / 自动选择 / 负载均衡')
+        ('多久换一次节点    : {0}' -f '__待填__')
+    )
+    try {
+        $dir = Split-Path -Parent $Export
+        if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Set-Content -Path $Export -Value ($lines -join "`r`n") -Encoding UTF8
+        Ok ("对照报告已导出：{0}" -f $Export)
+    } catch {
+        Bad ("导出失败：{0}" -f $_.Exception.Message)
+    }
+}
 
 

@@ -503,6 +503,52 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 > association risk. This script's security checks (proxy/hosting flags + exit rotation +
 > provenance) are dimensions the panel does not have at all.
 
+### 7. Environment comparison — have a non-technical friend run one (Windows)
+
+To test *what actually decides whether an account survives*, one machine's data is not enough.
+This flow lets someone who has never opened a terminal produce comparable data with one
+double-click.
+
+**For them**: zip the folder, send it over, tell them to double-click `一键体检.cmd`
+("one-click check-up"). It runs the audit, asks 9 questions about their account, and writes a
+report to their **Desktop**.
+
+> **Privacy is the first constraint here**, because the output is meant to be sent to someone else:
+> - The report is **desensitized by default** — no full exit IP (only `1.2.3.x`), no IPv6, no DNS
+>   addresses, no proxy environment-variable *values* (they can carry credentials), no machine
+>   name / username / any path. The system timezone is exported only as its **delta from the
+>   exit**, never as a timezone name (a name pinpoints where they live).
+> - After generating it, the script **prints the whole file to the screen** and tells them plainly:
+>   sending it is your call; delete any line you're not comfortable with, it won't break the comparison.
+> - **The script never sends anything anywhere.**
+> - The full audit output is saved separately and labelled "this one is for you, don't send it".
+
+**For you**: put two or more reports side by side.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\compare-reports.ps1 reportA.txt reportB.txt
+powershell -ExecutionPolicy Bypass -File .\compare-reports.ps1 .\reports\*.txt
+```
+
+> The report is deliberately split in two, and the comparison tool keeps them apart:
+>
+> | Section | Contents | Weight |
+> |---|---|---|
+> | 1. Network environment | takeover mode, exit provenance, fingerprint consistency… | measurable, but **low weight** |
+> | 2. Account & habits | how many bans (the *outcome* variable), account origin, registration year, shared or not… | not measurable, **but this is the main variable** |
+>
+> How to read it: **if the banned and never-banned people separate cleanly on section 2 but not
+> on section 1, that confirms "the difference is account provenance, not IP quality"** (see the
+> framing section at the top). With only two reports the tool says so explicitly: any difference
+> could be coincidence and is a lead, not a conclusion.
+
+`vpn-leak-audit.ps1 -Export <path>` produces the machine half of the report on its own
+(questionnaire lines left blank).
+
+> ⚠️ Windows only for now. There is no macOS / Linux comparison flow yet — the one place in this
+> repo where the "both versions are functionally equivalent" promise is deliberately broken,
+> because the shape of a one-click package (`.cmd` double-click) is inherently platform-specific.
+
 ## How it works
 
 | Signal | Windows | macOS / Linux |
