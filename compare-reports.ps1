@@ -49,7 +49,10 @@ foreach ($f in $files) {
     $reports += [pscustomobject]@{ Tag = $tag; File = $f.Name; KV = $kv }
 }
 
-$NET = @('流量接管方式','对外路由确实走TUN','出口国','出口网段','出口 ASN','出口 ISP',
+# 「出口基准可信」必须在最前面显示：它为「否」时，下面所有出口相关的值都不代表
+# 浏览器实际走的出口（Unix 上系统代理 + curl 读不到代理地址时会出现），整列不可用于对照。
+$NET = @('操作系统','流量接管方式','对外路由确实走TUN','出口基准可信',
+         '出口国','出口网段','出口 ASN','出口 ISP',
          '出口归属判定','被标记为 proxy','CLI/桌面应用出口','时区差(出口-系统)','系统区域',
          'IPv6','代理环境变量')
 $ACC = @('被封过吗(次数)','最近一次被封时间','账号来源','账号大概注册年份','注册用邮箱',
@@ -122,5 +125,11 @@ if ($accDiff -eq 0 -and $netDiff -gt 0) {
 }
 if ($reports.Count -eq 2) {
     Write-Host '  ⚠ 只有两份样本。任何一条差异都可能是巧合，只能当线索，不能当结论。' -ForegroundColor Yellow
+}
+$untrusted = @($reports | Where-Object { $_.KV['出口基准可信'] -and $_.KV['出口基准可信'] -notlike '是*' })
+if ($untrusted.Count -gt 0) {
+    Write-Host ('  ⚠ 有 {0} 份报告的「出口基准可信」不是「是」：{1}' -f $untrusted.Count, (($untrusted | ForEach-Object { $_.Tag }) -join ', ')) -ForegroundColor Red
+    Write-Host '    这几份里「出口国 / 出口 ASN / 出口 ISP / 时区差」拿到的是他的直连出口，' -ForegroundColor Red
+    Write-Host '    不是浏览器实际走的出口 —— 那几行不能用于对照，请让他开 TUN 后重跑。' -ForegroundColor Red
 }
 Write-Host ''

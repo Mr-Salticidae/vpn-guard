@@ -90,17 +90,25 @@ sysproxy_url_from_scutil() {
 # ---- 参数 ----
 DNS_LEAK=1
 SPEED_TEST=1
-for a in "$@"; do
-    case "$a" in
+EXPORT_PATH=""
+while [ $# -gt 0 ]; do
+    case "$1" in
         --no-dns-leak) DNS_LEAK=0 ;;
         --no-speed-test) SPEED_TEST=0 ;;
+        --export)
+            shift
+            if [ $# -eq 0 ]; then echo "--export 后面要跟一个文件路径" >&2; exit 1; fi
+            EXPORT_PATH="$1" ;;
+        --export=*) EXPORT_PATH=${1#--export=} ;;
         -h|--help)
-            echo "用法: ./vpn-leak-audit.sh [--no-dns-leak] [--no-speed-test]"
+            echo "用法: ./vpn-leak-audit.sh [--no-dns-leak] [--no-speed-test] [--export <路径>]"
             echo "  --no-dns-leak    跳过联网的 DNS 泄露主动实测（默认开启，走 bash.ws）"
             echo "  --no-speed-test  跳过链路质量实测（默认开启，约 20MB 流量）"
+            echo "  --export <路径>  额外导出一份已脱敏的对照报告（用于跨机器比对）"
             exit 0 ;;
-        *) echo "未知参数: ${a}（可用 --no-dns-leak / --no-speed-test）" >&2; exit 1 ;;
+        *) echo "未知参数: ${1}（可用 --no-dns-leak / --no-speed-test / --export）" >&2; exit 1 ;;
     esac
+    shift
 done
 
 AUDIT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -679,3 +687,103 @@ fi
 dline
 head_ " 自查完成。红色=需处理，黄色=注意，绿色=通过。"
 echo ""
+
+# ---------- 结构化导出（--export，用于跨机器对照）----------
+# 与 vpn-leak-audit.ps1 的 -Export 是同一份格式：**键名必须逐字节一致**，
+# 否则 compare-reports 认不出来。verify-classifier.sh 的 E 段机械比对两版键名。
+#
+# 设计前提：这份文件是要发给别人的，所以默认脱敏，只导出「对照需要的」维度。
+# 刻意不导出：完整出口 IP（只留 /24）、完整 IPv6、DNS 服务器地址、代理环境变量的值
+# （可能含凭据）、机器名 / 用户名 / 任何绝对路径。
+# 系统时区只导出「与出口的差值」而非时区名 —— 时区名会直接暴露所在地。
+if [ -n "$EXPORT_PATH" ]; then
+    # EXPORT-KEYS-BEGIN  （verify-classifier.sh 按此标记抽取键名与 .ps1 比对，别删）
+    mask_ip() {
+        case "$1" in
+            *.*.*.*) printf '%s.x\n' "${1%.*}" ;;
+            *) printf '\n' ;;
+        esac
+    }
+    e_class="n/a"
+    if [ "$ip_status" = "success" ]; then
+        if   [ "$ip_hosting" = "true" ];        then e_class="datacenter(hosting标记)"
+        elif [ -z "$exit_asnum" ];              then e_class="unknown(无AS号)"
+        elif [ "$resi_hit" = "1" ];             then e_class="residential"
+        elif [ "$exit_asnum" -ge 65536 ];       then e_class="datacenter(32位ASN推断)"
+        else                                         e_class="unknown"
+        fi
+    fi
+    e_cli="n/a"
+    if [ "$ip_status" = "success" ] && [ "$b_status" = "success" ]; then
+        if   [ "$b_query" != "$ip_query" ] && [ "$TUN_ROUTED" = "1" ]; then e_cli="出口轮换(同ASN)或泄露"
+        elif [ "$b_query" != "$ip_query" ];                            then e_cli="泄露"
+        elif [ "$TAKEOVER" = "none" ];                                 then e_cli="全程直连"
+        elif [ "$TUN_ROUTED" != "1" ];                                 then e_cli="无法判定(非TUN)"
+        else                                                                e_cli="已被隧道接管"
+        fi
+    fi
+    e_tz="n/a"
+    if [ "$ip_status" = "success" ]; then e_tz=$(( (ip_offset - sys_offset) / 3600 )); fi
+    # 归一化 locale：bash 侧是 zh_CN.UTF-8、PowerShell 侧是 zh-CN，不归一就没法比。
+    e_lang=$(printf '%s' "$sys_lang" | sed 's/\..*$//' | tr '_' '-')
+    [ -z "$e_lang" ] && e_lang="未设置"
+    e_v6="无公网IPv6"
+    if [ -n "$v6" ]; then
+        if   [ -n "$up_v6cc" ] && [ "$up_v6cc" = "$up_exit" ];        then e_v6="未泄露(同国)"
+        elif [ -n "$v6_asn" ] && [ "$v6_asn" = "$exit_asn" ];         then e_v6="未泄露(同ASN)"
+        elif [ -n "$up_v6cc" ];                                       then e_v6="疑似泄露"
+        else                                                               e_v6="有IPv6但无法判定"
+        fi
+    fi
+    e_env="未设置"
+    [ -n "$ENV_PX_SET" ] && e_env="已设置(值不导出)"
+    e_trust="是"
+    [ "$EXIT_TRUSTED" != "1" ] && e_trust="否(第1项是直连取得的，下面的出口信息不代表浏览器实际出口)"
+    e_seg="n/a"; e_asn="n/a"; e_cc="n/a"; e_isp="n/a"; e_proxy="否"
+    if [ "$ip_status" = "success" ]; then
+        e_seg=$(mask_ip "$ip_query"); e_cc="$ip_cc"; e_isp="$ip_isp"
+        [ -n "$exit_asnum" ] && e_asn="AS${exit_asnum}"
+        [ "$ip_proxy" = "true" ] && e_proxy="是"
+    fi
+
+    ex_dir=$(dirname "$EXPORT_PATH")
+    [ -d "$ex_dir" ] || mkdir -p "$ex_dir" 2>/dev/null
+    {
+        echo "# vpn-guard 环境对照报告（已脱敏）"
+        echo "# 本文件不含完整 IP、IPv6、DNS 地址、代理凭据、机器名或路径。"
+        echo "生成时间          : $(date '+%Y-%m-%d %H:%M')"
+        echo "报告格式版本      : 1"
+        echo "操作系统          : $(uname -s)"
+        echo ""
+        echo "## 一、网络环境（脚本实测）"
+        echo "流量接管方式      : ${TAKEOVER}"
+        echo "对外路由确实走TUN : $([ "$TUN_ROUTED" = "1" ] && echo 是 || echo 否)"
+        echo "出口基准可信      : ${e_trust}"
+        echo "出口国            : ${e_cc}"
+        echo "出口网段          : ${e_seg}"
+        echo "出口 ASN          : ${e_asn}"
+        echo "出口 ISP          : ${e_isp}"
+        echo "出口归属判定      : ${e_class}"
+        echo "被标记为 proxy    : ${e_proxy}"
+        echo "CLI/桌面应用出口  : ${e_cli}"
+        echo "时区差(出口-系统) : ${e_tz} 小时"
+        echo "系统区域          : ${e_lang}"
+        echo "IPv6              : ${e_v6}"
+        echo "代理环境变量      : ${e_env}"
+        echo ""
+        echo "## 二、账号与使用习惯（需人工填写 —— 这部分才是关键变量）"
+        echo "# 脚本测不到这些，但按已有结论，它们比上面任何一项都更能决定账号存活。"
+        echo "# 请如实填写，不确定就写「不清楚」。"
+        echo "被封过吗(次数)    : __待填__"
+        echo "最近一次被封时间  : __待填__"
+        echo "账号来源          : __待填__  # 自己注册 / 别人给的 / 买的 / 多人合租"
+        echo "账号大概注册年份  : __待填__"
+        echo "注册用邮箱        : __待填__  # 自己长期在用的 / 为注册临时建的"
+        echo "是否与他人共用    : __待填__"
+        echo "是否绑过支付方式  : __待填__  # 没绑 / 绑了(哪国的卡)"
+        echo "客户端节点策略    : __待填__  # 固定一个节点 / 自动选择 / 负载均衡"
+        echo "多久换一次节点    : __待填__"
+    } > "$EXPORT_PATH" 2>/dev/null
+    # EXPORT-KEYS-END
+    if [ -f "$EXPORT_PATH" ]; then ok "对照报告已导出：${EXPORT_PATH}"; else bad "导出失败：写不了 ${EXPORT_PATH}"; fi
+fi

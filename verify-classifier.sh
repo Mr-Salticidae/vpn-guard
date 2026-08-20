@@ -315,6 +315,34 @@ PXEOF
     done < "$TMP/pxout"
 fi
 
+# =============================================================================
+# E. 对照报告键名两版一致性
+# compare-reports 靠键名匹配把两份报告并排。键名一旦有一版被改动，
+# 比对会静默漏掉那一行（不报错、只是那项永远显示「—」），所以做成硬闸门。
+# 纯静态文本比对：从两个文件的 EXPORT-KEYS 标记之间抽键名，不联网、不执行。
+# =============================================================================
+echo; echo "==== E) 对照报告键名两版一致性 ===="
+if ! grep -q 'EXPORT-KEYS-BEGIN' vpn-leak-audit.sh 2>/dev/null || ! grep -q 'EXPORT-KEYS-BEGIN' vpn-leak-audit.ps1 2>/dev/null; then
+    no "找不到 EXPORT-KEYS-BEGIN 标记（.sh 或 .ps1）"
+else
+    # .sh 侧：echo "键名   : ..."      .ps1 侧：('键名   : {0}' -f ...) 或 '键名 : x'
+    awk '/EXPORT-KEYS-BEGIN/,/EXPORT-KEYS-END/' vpn-leak-audit.sh \
+      | sed -n 's/^[[:space:]]*echo "\([^":]*\)[[:space:]]*:.*/\1/p' \
+      | sed 's/[[:space:]]*$//' | grep -v '^#' > "$TMP/keys.sh"
+    awk '/EXPORT-KEYS-BEGIN/,/EXPORT-KEYS-END/' vpn-leak-audit.ps1 | tr -d '\r' \
+      | sed -n "s/^[[:space:]]*(\{0,1\}'\([^':]*\)[[:space:]]*:.*/\1/p" \
+      | sed 's/[[:space:]]*$//' | grep -v '^#' > "$TMP/keys.ps1"
+    n1=$(grep -c . "$TMP/keys.sh"); n2=$(grep -c . "$TMP/keys.ps1")
+    if [ "$n1" -lt 20 ] || [ "$n2" -lt 20 ]; then
+        no "抽到的键名太少（sh=${n1} ps1=${n2}，预期 20+）—— 抽取头子或导出块被改过，无法判定"
+    elif diff -q "$TMP/keys.sh" "$TMP/keys.ps1" >/dev/null 2>&1; then
+        ok "两版导出键名逐字节一致（${n1} 个）"
+    else
+        no "两版导出键名不一致 —— compare-reports 会静默漏项"
+        diff "$TMP/keys.sh" "$TMP/keys.ps1" | head -12 | sed 's/^/      /'
+    fi
+fi
+
 echo; echo "============================================"
 echo "  结果：PASS=$pass  FAIL=$fail  SKIP=$skip"
 if [ "$fail" -eq 0 ]; then

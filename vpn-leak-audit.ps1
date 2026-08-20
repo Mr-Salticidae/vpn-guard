@@ -489,15 +489,20 @@ if ($Export) {
         else                                                               { $v6Verdict = '有IPv6但无法判定' }
     }
 
+    # EXPORT-KEYS-BEGIN  （verify-classifier.sh 按此标记抽取键名与 .sh 比对，别删）
     $lines = @(
         '# vpn-guard 环境对照报告（已脱敏）'
         '# 本文件不含完整 IP、IPv6、DNS 地址、代理凭据、机器名或路径。'
         ('生成时间          : {0}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm'))
         ('报告格式版本      : 1')
+        ('操作系统          : Windows')
         ''
         '## 一、网络环境（脚本实测）'
         ('流量接管方式      : {0}' -f $TakeoverMode)
         ('对外路由确实走TUN : {0}' -f $(if ($TunRouted) { '是' } else { '否' }))
+        # Windows 上第 1 项走 Invoke-RestMethod（读 WinINET 系统代理），拿到的就是浏览器侧出口，
+        # 基准恒为可信。Unix 侧不同（curl 不读 scutil/gsettings），那边这一项可能是「否」。
+        ('出口基准可信      : {0}' -f '是')
         ('出口国            : {0}' -f $(if ($ok) { $ipapi.countryCode } else { 'n/a' }))
         ('出口网段          : {0}' -f $(if ($ok) { MaskIp $ipapi.query } else { 'n/a' }))
         ('出口 ASN          : {0}' -f $(if ($ok -and $exitAsnNum -gt 0) { "AS$exitAsnNum" } else { 'n/a' }))
@@ -523,6 +528,7 @@ if ($Export) {
         ('客户端节点策略    : {0}' -f '__待填__  # 固定一个节点 / 自动选择 / 负载均衡')
         ('多久换一次节点    : {0}' -f '__待填__')
     )
+    # EXPORT-KEYS-END
     try {
         $dir = Split-Path -Parent $Export
         if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
