@@ -210,13 +210,15 @@ else
         echo 'function T($name,$cond,$got){ if($cond){Write-Host "PASS|$name"}else{Write-Host "FAIL|$name —— $got"} }'
 
         # 四个真实样本
-        echo '$c1 = Get-ExitClass -AsField "AS3462 Data Communication Business Group" -AsName "HINET" -Isp "Chunghwa Telecom Co., Ltd." -Ip "61.223.105.154" -Cc "TW"'
+        echo '$c1 = Get-ExitClass -AsField "AS3462 Data Communication Business Group" -AsName "HINET" -Isp "Chunghwa Telecom Co., Ltd." -Ip "203.0.113.1" -Cc "TW"'
         echo 'T "中华电信判为住宅" ($c1.class -eq "residential") $c1.class'
-        echo '$c2 = Get-ExitClass -AsField "AS131939 IPS INC" -AsName "APNIC-ASBLOCK-131478" -Isp "IPS INC" -Ip "103.120.18.37" -Cc "JP"'
+        echo '$c2 = Get-ExitClass -AsField "AS131939 IPS INC" -AsName "APNIC-ASBLOCK-131478" -Isp "IPS INC" -Ip "203.0.113.2" -Cc "JP"'
         echo 'T "IPS INC 判为机房" ($c2.class -eq "datacenter") $c2.class'
-        echo '$c3 = Get-ExitClass -AsField "AS131642 Pittqiao Network Information Co.,Ltd." -AsName "PNI-AS-TW" -Isp "Pittqiao Network Information Co., Ltd." -Ip "103.137.63.194" -Cc "TW"'
+        echo '$c3 = Get-ExitClass -AsField "AS131642 Pittqiao Network Information Co.,Ltd." -AsName "PNI-AS-TW" -Isp "Pittqiao Network Information Co., Ltd." -Ip "203.0.113.3" -Cc "TW"'
         echo 'T "Pittqiao 判为机房" ($c3.class -eq "datacenter") $c3.class'
-        echo '$c4 = Get-ExitClass -AsField "AS209642 Mejiro Network Limited" -AsName "MEJIRONETWORK" -Isp "Mejiro Network Limited" -Ip "89.251.11.30" -Cc "HK"'
+        echo '$c4 = Get-ExitClass -AsField "AS209642 Mejiro Network Limited" -AsName "MEJIRONETWORK" -Isp "Mejiro Network Limited" -Ip "89.0.0.1" -Cc "HK"'
+        # 89.0.0.1 的首字节 89 落在 RIPE 段(77-95)，配 Cc=HK 触发「欧洲段落地亚太」+2，
+        # 这是 Mejiro 得分 6 的组成部分之一 —— 换成别的首字节会让下面的分数哨兵失败。
         echo 'T "Mejiro 判为机房" ($c4.class -eq "datacenter") $c4.class'
 
         # 阈值哨兵。Pittqiao 的得分恰好等于阈值，全靠单一的 32 位信号支撑：
@@ -232,9 +234,9 @@ else
         echo 'T "词表陷阱：16 位 + 名字带 data + 无运营商词，不得被判机房" ($c5.class -ne "datacenter") ("class=" + $c5.class + " score=" + $c5.score)'
 
         # 大云不得被误判为住宅 —— 唯一不可接受的方向
-        echo '$c6 = Get-ExitClass -AsField "AS14061 DigitalOcean, LLC" -AsName "DIGITALOCEAN-ASN" -Isp "DigitalOcean, LLC" -Ip "165.232.174.67" -Cc "SG"'
+        echo '$c6 = Get-ExitClass -AsField "AS14061 DigitalOcean, LLC" -AsName "DIGITALOCEAN-ASN" -Isp "DigitalOcean, LLC" -Ip "203.0.113.6" -Cc "SG"'
         echo 'T "DigitalOcean 不得被判住宅" ($c6.class -ne "residential") $c6.class'
-        echo '$c7 = Get-ExitClass -AsField "AS16509 Amazon.com, Inc." -AsName "AMAZON-02" -Isp "Amazon.com" -Ip "13.159.199.147" -Cc "JP"'
+        echo '$c7 = Get-ExitClass -AsField "AS16509 Amazon.com, Inc." -AsName "AMAZON-02" -Isp "Amazon.com" -Ip "203.0.113.7" -Cc "JP"'
         echo 'T "AWS 不得被判住宅" ($c7.class -ne "residential") $c7.class'
 
         # ASN 溢出：[int] 会抛异常并退化为 unknown，[long] 才能正确解析

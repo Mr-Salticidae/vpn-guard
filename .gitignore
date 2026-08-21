@@ -7,3 +7,8 @@ chrome-*-profile/
 
 # AI 助手工作区数据
 .workbuddy/
+
+# 本机真实运行输出（含完整出口 IP / 节点名 / ISP）—— 绝不入库
+auto-select-live.txt
+vpn-guard对照报告_*.txt
+vpn-guard详细结果_*.txt
