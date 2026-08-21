@@ -1,5 +1,5 @@
 ﻿<#
-  auto-select-node.ps1  —  自动节点筛选与调配   (vpn-guard v1.1.0)
+  auto-select-node.ps1  —  自动节点筛选与调配   (vpn-guard v1.2.0)
 
   在安全性前提下自动找到最优代理节点并切换。
   通过 mihomo named pipe API 通信，渐进式筛选：
