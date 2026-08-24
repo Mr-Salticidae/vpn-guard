@@ -115,7 +115,7 @@ $appAliases = @(
     @{ Names=@('claude','claude-code','cc');Label='Claude Code CLI';  Gui=$false; Cmd='claude' }
     @{ Names=@('claude-desktop','claudeapp');Label='Claude 桌面版';   Gui=$true;  Cmd=''
        Paths=@('%LOCALAPPDATA%\AnthropicClaude\claude.exe','%LOCALAPPDATA%\Programs\claude\Claude.exe','%LOCALAPPDATA%\Programs\AnthropicClaude\claude.exe')
-       Reg='Claude' }
+       Msix='Claude'; Reg='Claude' }
     @{ Names=@('cursor');                   Label='Cursor';           Gui=$true;  Cmd=''
        Paths=@('%LOCALAPPDATA%\Programs\cursor\Cursor.exe'); Reg='Cursor' }
     @{ Names=@('code','vscode');            Label='VS Code';          Gui=$true;  Cmd=''
@@ -160,6 +160,41 @@ function Find-InstalledApp([string]$displayName) {
     return $null
 }
 
+# 从 MSIX / Microsoft Store 安装里找主程序入口（Claude 桌面版等 FullTrust 打包应用）。
+# 入口写在 AppxManifest.xml 的 <Application Executable>，相对 InstallLocation。
+function Find-MsixApp([string]$pkgName) {
+    try {
+        $pkg = Get-AppxPackage -Name $pkgName -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $pkg -or -not $pkg.InstallLocation) { return $null }
+        $manifest = Join-Path $pkg.InstallLocation 'AppxManifest.xml'
+        $exeRel = $null; $appId = $null
+        if (Test-Path $manifest) {
+            try {
+                [xml]$m = Get-Content $manifest -Encoding UTF8
+                $app = $m.Package.Applications.Application
+                if ($app) { $exeRel = $app.Executable; $appId = $app.Id }
+            } catch {}
+        }
+        $exe = $null
+        if ($exeRel) {
+            $exe = Join-Path $pkg.InstallLocation $exeRel
+            if (-not (Test-Path $exe)) { $exe = $null }
+        }
+        if (-not $exe) {
+            # 兜底：在安装目录下找主 exe（排除卸载/更新/崩溃上报/服务类）
+            $exe = Get-ChildItem $pkg.InstallLocation -Filter '*.exe' -Recurse -Depth 3 -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -notmatch '(?i)unins|update|crash|setup|native-host|svc' } | Select-Object -First 1
+            if ($exe) { $exe = $exe.FullName }
+        }
+        if (-not $exe) { return $null }
+        # AUMID = PackageFamilyName + '!' + ApplicationId，供 shell:AppsFolder 激活（直接跑 WindowsApps 里的 exe 会被拒）
+        $aumid = $null
+        if ($pkg.PackageFamilyName -and $appId) { $aumid = $pkg.PackageFamilyName + '!' + $appId }
+        return @{ Path = $exe; Aumid = $aumid }
+    } catch {}
+    return $null
+}
+
 # 读 PE 头的 Subsystem 字段判定 GUI(2) / 控制台(3)。
 # 决定用 & 内联运行（控制台程序，保持交互）还是 Start-Process -Wait（GUI 程序才能正确等待退出）。
 # Subsystem 在 PE32 与 PE32+ 的可选头里都位于偏移 68。
@@ -189,6 +224,10 @@ function Resolve-App([string]$name) {
             if (-not $p) { continue }
             $ex = [Environment]::ExpandEnvironmentVariables($p)
             if (Test-Path $ex) { return @{ Path=$ex; Label=$a.Label; Gui=$a.Gui } }
+        }
+        if ($a.Msix) {
+            $found = Find-MsixApp $a.Msix
+            if ($found) { return @{ Path=$found.Path; Aumid=$found.Aumid; Label=$a.Label; Gui=$a.Gui } }
         }
         if ($a.Reg) {
             $found = Find-InstalledApp $a.Reg
@@ -251,7 +290,8 @@ if (-not $proxyUrl -and -not $tunActive) {
 Write-Host "1) 探测当前出口" -ForegroundColor Cyan
 $exit = $null
 try {
-    $u = "http://ip-api.com/json/?fields=status,country,countryCode,city,timezone,offset,isp,query,proxy,hosting"
+    # as 与其余字段同一次请求，零额外配额；用于识别 ip-api 未收录的小主机商出口。
+    $u = "http://ip-api.com/json/?fields=status,country,countryCode,city,timezone,offset,isp,as,query,proxy,hosting"
     # PS5.1 的 -Proxy 只支持 http(s)；SOCKS 时退回直连探测（TUN 下结果依然正确）
     if ($proxyUrl -match '^https?://') { $exit = Invoke-RestMethod -Uri $u -Proxy $proxyUrl -TimeoutSec 15 }
     else                               { $exit = Invoke-RestMethod -Uri $u -TimeoutSec 15 }
@@ -261,7 +301,18 @@ $cc = ''; $iana = ''; $ipOffset = $null
 if ($exit -and $exit.status -eq 'success') {
     Info ("出口 IP : {0}" -f $exit.query)
     Info ("位置    : {0} / {1} ({2}), {3} (UTC{4:+0;-0}:00)" -f $exit.city,$exit.country,$exit.countryCode,$exit.timezone,($exit.offset/3600))
-    if ($exit.proxy -or $exit.hosting) { Warn "该 IP 被标记为 proxy/hosting，高风控平台可能拦截。" }
+    if ($exit.proxy -or $exit.hosting) {
+        Warn "该 IP 被标记为 proxy/hosting，高风控平台可能拦截。"
+    } else {
+        # hosting=false 只说明 ip-api 库里没这条记录，不等于住宅。16 位 ASN 空间在 2014 年前后
+        # 被各注册局分配殆尽，家宽运营商全都在那之前拿到号段；32 位 ASN 绝大多数是之后注册的
+        # 小主机商。只告警，因此不需要 auto-select-node 那张住宅 ASN 名单。
+        $exitAsn = 0
+        if ("$($exit.as)" -match '^\s*AS(\d+)') { $exitAsn = [long]$Matches[1] }
+        if ($exitAsn -ge 65536) {
+            Warn ("出口 AS{0} 是 32 位 ASN（2014 年后发放），多半是小主机商而非住宅段；ip-api 没标记不代表干净。" -f $exitAsn)
+        }
+    }
     $cc = $exit.countryCode.ToUpper(); $iana = $exit.timezone; $ipOffset = $exit.offset
     if ($Country -and $Country.ToUpper() -ne $cc) {
         Warn ("你指定了 -Country {0}，但出口在 {1}；语言按你指定的走，时区仍跟随真实出口。" -f $Country.ToUpper(), $cc)
@@ -325,6 +376,7 @@ $isGui = if ($null -ne $target.Gui) { $target.Gui } else {
 Write-Host ""
 Write-Host ("目标应用: {0}" -f $target.Label) -ForegroundColor Cyan
 Info ("路径     : {0}" -f $target.Path)
+    if ($target.Aumid) { Info ("激活方式 : shell:AppsFolder\{0}（MSIX 应用，环境变量无法注入，靠 TUN 全局接管）" -f $target.Aumid) }
 Info ("类型     : {0}" -f $(if ($isGui) { 'GUI（Chromium/Electron 系不认 TZ）' } else { '控制台（Node/Rust 等认 TZ，进程级生效）' }))
 if ($targetArgs) { Info ("透传参数 : {0}" -f ($targetArgs -join ' ')) }
 
@@ -375,9 +427,16 @@ try {
     Write-Host ("-" * 60) -ForegroundColor DarkGray
 
     if ($isGui) {
-        # GUI 程序：& 不会等待，必须 Start-Process -Wait
-        if ($targetArgs) { Start-Process -FilePath $target.Path -ArgumentList $targetArgs -Wait }
-        else             { Start-Process -FilePath $target.Path -Wait }
+        if ($target.Aumid) {
+            # MSIX / Store 应用：直接跑 WindowsApps 里的 exe 会被拒绝，用 explorer shell:AppsFolder 激活。
+            # explorer 激活后立即返回，无法等到应用退出；环境变量/TZ 本就不注入 MSIX 应用，
+            # 它靠 TUN 全局接管兜底（无 TUN 时靠系统代理覆盖 Chromium 渲染进程）。
+            Start-Process explorer.exe -ArgumentList "shell:AppsFolder\$($target.Aumid)"
+        } else {
+            # GUI 程序：& 不会等待，必须 Start-Process -Wait
+            if ($targetArgs) { Start-Process -FilePath $target.Path -ArgumentList $targetArgs -Wait }
+            else             { Start-Process -FilePath $target.Path -Wait }
+        }
     } else {
         # 控制台程序：内联运行，保留 stdin/stdout，交互式 CLI 才能正常用
         if ($targetArgs) { & $target.Path @targetArgs }

@@ -205,13 +205,16 @@ fi
 # ---- 1) 探测出口 ----
 echo "${C_CYAN}1) 探测当前出口${C_RESET}"
 resp=$(curl -fsS --max-time 15 ${proxy_url:+-x "$proxy_url"} \
-  "http://ip-api.com/line/?fields=status,country,countryCode,city,timezone,offset,isp,query,proxy,hosting" 2>/dev/null)
-ip_status=""; ip_country=""; ip_cc=""; ip_city=""; ip_tz=""; ip_offset=""; ip_isp=""; ip_query=""; ip_proxy=""; ip_hosting=""
+  "http://ip-api.com/line/?fields=status,country,countryCode,city,timezone,offset,isp,as,query,proxy,hosting" 2>/dev/null)
+ip_status=""; ip_country=""; ip_cc=""; ip_city=""; ip_tz=""; ip_offset=""; ip_isp=""; ip_as=""; ip_query=""; ip_proxy=""; ip_hosting=""
 if [ -n "$resp" ]; then
-    # ip-api 的 line 格式按其固定字段顺序返回（query 在最后），与请求参数顺序无关
+    # ip-api 的 line 格式按其固定字段顺序返回，与请求参数顺序无关。
+    # 已实测确认（用打乱的请求顺序 A/B 对照）：as 排在 isp 之后、proxy 之前，query 在最后。
+    # 改字段前务必重测 —— 位置读取链串位是静默错误，不会报任何错。
     # shellcheck disable=SC2034
     { read -r ip_status; read -r ip_country; read -r ip_cc; read -r ip_city; read -r ip_tz
-      read -r ip_offset; read -r ip_isp; read -r ip_proxy; read -r ip_hosting; read -r ip_query; } <<EOF
+      read -r ip_offset; read -r ip_isp; read -r ip_as; read -r ip_proxy; read -r ip_hosting
+      read -r ip_query; } <<EOF
 $resp
 EOF
 fi
@@ -220,7 +223,18 @@ cc=""; tz=""
 if [ "$ip_status" = "success" ]; then
     info "出口 IP : $ip_query"
     info "位置    : $ip_city / $ip_country ($ip_cc), $ip_tz (UTC$(printf '%+d' $((ip_offset/3600))):00)"
-    [ "$ip_proxy" = "true" ] || [ "$ip_hosting" = "true" ] && warn "该 IP 被标记为 proxy/hosting，高风控平台可能拦截。"
+    if [ "$ip_proxy" = "true" ] || [ "$ip_hosting" = "true" ]; then
+        warn "该 IP 被标记为 proxy/hosting，高风控平台可能拦截。"
+    else
+        # hosting=false 只说明 ip-api 库里没这条记录，不等于住宅。16 位 ASN 空间在 2014 年前后
+        # 被各注册局分配殆尽，家宽运营商全都在那之前拿到号段；32 位 ASN 绝大多数是之后注册的
+        # 小主机商。只告警，因此不需要 auto-select-node 那张住宅 ASN 名单。
+        exit_asn=""
+        case "$ip_as" in AS[0-9]*) exit_asn=${ip_as#AS}; exit_asn=${exit_asn%% *} ;; esac
+        if [ -n "$exit_asn" ] && [ "$exit_asn" -ge 65536 ]; then
+            warn "出口 AS${exit_asn} 是 32 位 ASN（2014 年后发放），多半是小主机商而非住宅段；ip-api 没标记不代表干净。"
+        fi
+    fi
     cc=$ip_cc; tz=$ip_tz
     if [ -n "$COUNTRY" ] && [ "$COUNTRY" != "$cc" ]; then
         warn "你指定了国家 ${COUNTRY}，但出口在 ${cc}；语言按你指定的走，时区仍跟随真实出口。"
