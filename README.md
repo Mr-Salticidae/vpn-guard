@@ -106,6 +106,28 @@ chmod +x *.sh        # 仅 macOS / Linux 需要（git 通常已保留可执行�
 ```
 脚本用**自身所在目录**做工作目录，克隆到任意位置都能直接用，无需改路径。
 
+目录结构：
+
+```
+vpn-guard/
+├── vpn-leak-audit.ps1 / .sh     第 1 节 泄露自查
+├── browse-vpn.ps1 / .sh         第 2 节 一致性浏览会话
+├── app-vpn.ps1 / .sh            第 3 节 桌面应用 / CLI 会话
+├── webrtc-leak-test.html        第 4 节 WebRTC 检测页
+├── auto-select-node.ps1         第 6 节 自动节点筛选（Windows）
+├── residential-asn.txt          可选：自定义住宅 ASN 名单
+├── field-report.ps1 / .sh       第 7 节 环境对照：生成报告
+├── compare-reports.ps1          第 7 节 环境对照：比对报告
+├── 一键体检.cmd / .command      第 7 节 环境对照：双击入口
+├── shortcuts/                   第 5 节 各国快捷入口，以及 launch-claude-desktop.cmd
+├── tests/                       回归测试，CI 里也跑
+└── assets/                      README 封面图
+```
+
+主脚本放在根目录是有意的：`webrtc-leak-test.html` 和 `residential-asn.txt` 由脚本从自身所在目录读取，
+`browse-vpn` 也把 Chrome 配置目录（`chrome-XX-profile/`）建在这一层。
+**别把主脚本挪进子目录**，否则会读不到这两个文件，还会新建一个空的 Chrome 配置，已有的登录态就没了。
+
 ## 用法 / Usage
 
 ### 1. 一键泄露自查（只读，不改任何系统设置）
@@ -136,7 +158,7 @@ powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoSpeedTest  # �
 > `auto-select-node`（第 6 节）在它之上还叠了机构名词表等辅助信号，是加权评分。
 > 因此**同一个出口两边可能给出不同判定**——实测例子：32 位 ASN 但机构名含运营商词的出口，
 > 选点器判「未识别」而自查判「推断为机房」；16 位 ASN 但机构名含 `Hosting` 的出口反过来。
-> 两者共用的只有那份 ASN 名单，`verify-unix.sh` 第 11 项机械比对它不漂移。
+> 两者共用的只有那份 ASN 名单，`tests/verify-unix.sh` 第 11 项机械比对它不漂移。
 >
 > **桌面应用 / CLI 出口实测**（第 2 项）：用 `curl --noproxy '*'` 复刻"完全不认代理的程序"发起请求，
 > 再与第 1 项的浏览器出口比对。**两者不一致就说明 Claude / Codex 这类程序正在绕过代理直连**。
@@ -301,8 +323,12 @@ WebRTC 会为了打洞通过 STUN 发 UDP，拿回"公网看到的你的 IP"。*
 > 修复泄露：用浏览器扩展禁用 WebRTC，或让客户端以 **TUN 模式**接管全局 UDP。
 
 ### 5. 各国快捷入口（Windows，双击 / 免记参数）
-`browse-jp` 日本 · `browse-us` 美国 · `browse-sg` 新加坡 · `browse-hk` 香港 · `browse-gb` 英国 · `browse-de` 德国 · `browse-kr` 韩国。
+位于 `shortcuts/` 目录：`browse-jp` 日本 · `browse-us` 美国 · `browse-sg` 新加坡 · `browse-hk` 香港 · `browse-gb` 英国 · `browse-de` 德国 · `browse-kr` 韩国。
 每个都等价于 `browse-vpn.ps1 -Country XX`，均支持 `-DryRun`。
+```powershell
+powershell -ExecutionPolicy Bypass -File .\shortcuts\browse-jp.ps1 -DryRun
+```
+同目录的 `launch-claude-desktop.cmd` 双击即等价于 `app-vpn.ps1 claude-desktop -SystemTz`（见第 3 节）。
 macOS / Linux 直接传国家码即可（`./browse-vpn.sh jp`），无需单独入口脚本。
 
 **已内置预设**（时区 + 语言）：JP / KR / SG / HK / TW / GB / DE / FR / NL / US / CA / AU。
@@ -376,7 +402,7 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 > 但**分类器不止这一条判据**（这点别被上面那段带偏）：它是一个加权评分，总分 ≥ 3 判机房——
 > 分配年代 +3（号段 ≥ 200000 再 +1）、机构名含机房词 +3（**单这一条就够到阈值**）、
 > 亚太落地的欧洲 RIPE 段 +2、AS-NAME 仍是 RIR 占位符 +1、机构名含运营商词 **−3**。
-> 分配年代那条不会腐坏，**两张词表会**——`verify-classifier.sh` 为它们留了专门的哨兵，
+> 分配年代那条不会腐坏，**两张词表会**——`tests/verify-classifier.sh` 为它们留了专门的哨兵，
 > 改词表之前先跑它。
 >
 > **淘汰是「相对」的**：只有池中还留得下非机房节点时，机房节点才被剔除。全池都被判为机房
@@ -454,7 +480,7 @@ powershell -ExecutionPolicy Bypass -File .\compare-reports.ps1 .\reports\*.txt  
 `vpn-leak-audit.ps1 -Export <路径>` 可单独产出报告的机器部分（问卷部分留空待填）。
 
 > **报告生成端两版对等**（`.cmd` / `.command`，`-Export` / `--export`），
-> 两版导出的**键名逐字节一致**，由 `verify-classifier.sh` 的 E 段做硬闸门比对 ——
+> 两版导出的**键名逐字节一致**，由 `tests/verify-classifier.sh` 的 E 段做硬闸门比对 ——
 > 键名一旦有一版被改动，比对会静默漏掉那一行，所以它必须是机械保证的。
 >
 > ⚠️ **比对端（`compare-reports.ps1`）目前只有 Windows 版**。这是有意的：报告由各人生成、

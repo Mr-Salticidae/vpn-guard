@@ -24,14 +24,14 @@ jobs:
           bash -n vpn-leak-audit.sh
           bash -n browse-vpn.sh
           bash -n app-vpn.sh
-          bash -n verify-unix.sh
-          bash -n verify-classifier.sh
+          bash -n tests/verify-unix.sh
+          bash -n tests/verify-classifier.sh
 
       # 硬闸门。本步与流水线里其余步骤性质不同：它不联网、不依赖 Chrome、不看 DNS，
       # 全部是纯函数 / 纯文本比对，因此失败必然是代码问题，绝不会因环境抖动误红。
       # 跨语言比对需要 PowerShell —— ubuntu-latest / macos-latest 都预装 pwsh。
       - name: 分类器行为回归（硬闸门）
-        run: bash ./verify-classifier.sh
+        run: bash tests/verify-classifier.sh
 
       - name: 禁止「$变量」紧邻多字节字符（macOS bash 3.2 会把首字节吞进变量名）
         shell: bash
@@ -40,7 +40,7 @@ jobs:
           # 因该脚本开了 set -u 直接报 "unbound variable" 退出；没开 set -u 的脚本则是
           # 静默吞掉一个字符、输出少个括号。一律要求写成 ${var}。
           # 用 perl 而非 grep -P：macOS 自带的 BSD grep 不支持 -P。
-          hits=$(perl -ne 'print "$ARGV:$.: $_" if /\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]/' ./*.sh || true)
+          hits=$(perl -ne 'print "$ARGV:$.: $_" if /\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]/' ./*.sh tests/*.sh || true)
           if [ -n "$hits" ]; then
             echo "以下位置的变量紧邻多字节字符，必须改用 \${var} 花括号写法："
             echo "$hits"
@@ -51,7 +51,7 @@ jobs:
       - name: ShellCheck 静态分析
         run: |
           if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck -S warning vpn-leak-audit.sh browse-vpn.sh app-vpn.sh verify-unix.sh verify-classifier.sh
+            shellcheck -S warning vpn-leak-audit.sh browse-vpn.sh app-vpn.sh tests/verify-unix.sh tests/verify-classifier.sh
           else
             echo "shellcheck 不可用，跳过（非本平台预装）"
           fi
@@ -181,7 +181,7 @@ jobs:
       # 失败不代表代码有问题，所以它整体保持信息性、不因这些返回非零。
       # 唯独第 11 项「ASN 名单三方一致性」是硬失败 —— 纯文本比对，漂移必然是代码问题。
       - name: verify-unix.sh 汇总（仅 ASN 名单漂移为硬失败）
-        run: bash ./verify-unix.sh
+        run: bash tests/verify-unix.sh
 
       - name: 核心卖点验证 —— 真 Chrome 是否遵从 TZ 环境变量
         shell: bash

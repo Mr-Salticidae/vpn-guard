@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # verify-unix.sh — 在真实 macOS/Linux 上验证 vpn-guard 的平台相关部分
-# 用法：把此文件放到 vpn-guard 目录里，bash ./verify-unix.sh
+# 用法：bash tests/verify-unix.sh   （任意目录下运行均可，脚本会先切到仓库根目录）
 # 只读、不启动浏览器、不改任何设置。
+
+# 下面所有 ./xxx.sh、./xxx.ps1 都相对仓库根目录；本文件在 tests/ 下，所以切到上一级。
+cd "$(dirname "$0")/.." || exit 1
 
 pass=0; fail=0
 ok(){ echo "  [PASS] $1"; pass=$((pass+1)); }

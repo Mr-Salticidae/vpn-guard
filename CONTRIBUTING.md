@@ -33,7 +33,7 @@ powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Country IT -DryRun
 很容易在「顺手改一下」时静默失效。动它之前和之后各跑一次：
 
 ```bash
-bash ./verify-classifier.sh    # 硬闸门，CI 里也跑；纯函数比对，不联网
+bash tests/verify-classifier.sh    # 硬闸门，CI 里也跑；纯函数比对，不联网
 ```
 
 它守着三件事：**bash 侧判定正确性**、**`.ps1` 与 `.sh` 输出逐字节一致**、
@@ -49,7 +49,7 @@ bash ./verify-classifier.sh    # 硬闸门，CI 里也跑；纯函数比对，�
 
 另外，ASN 名单在三个文件里各有一份拷贝（这是刻意的 —— 仓库的分发方式就是
 「拷一个脚本走」，共享库文件会让分类器的正面判定依赖一个用户没有的文件）。
-三份必须是同一个集合，由 `verify-unix.sh` 第 11 项机械比对，漂移即硬失败。
+三份必须是同一个集合，由 `tests/verify-unix.sh` 第 11 项机械比对，漂移即硬失败。
 **在 `ASN-TABLE-BEGIN` / `ASN-TABLE-END` 之间除 ASN 号外不得出现任何数字**，
 说明性文字写在 BEGIN 之上。
 
@@ -61,6 +61,8 @@ bash ./verify-classifier.sh    # 硬闸门，CI 里也跑；纯函数比对，�
   $c = Get-Content -Raw -Encoding UTF8 .\browse-vpn.ps1
   Set-Content -Path .\browse-vpn.ps1 -Value $c -Encoding UTF8   # PS5.1 写出带 BOM
   ```
+- **主脚本留在根目录**：`webrtc-leak-test.html`、`residential-asn.txt` 和 Chrome 配置目录都按「脚本所在目录」定位，
+  主脚本一旦挪进子目录就会找不到它们。快捷入口放 `shortcuts/`，测试放 `tests/`，它们用 `..` 指回根目录。
 - **PowerShell 5.1 兼容**：不用三元运算符 `?:`、`??`、`?.`（5.1 不支持）。
 - **不改系统持久状态**：时区切换必须用 `try/finally` 保证还原；只作用于本会话。
 - **隐私**：PR / issue 里**不要**出现真实出口 IP、真实 DNS、账号、本机绝对路径。用 `<xxx>` 占位。

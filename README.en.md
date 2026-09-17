@@ -129,6 +129,29 @@ chmod +x *.sh        # macOS / Linux only (git usually preserves the executable 
 The scripts use **their own directory** as the working directory — clone anywhere and run
 directly, no path edits needed.
 
+Layout:
+
+```
+vpn-guard/
+├── vpn-leak-audit.ps1 / .sh     §1 leak audit
+├── browse-vpn.ps1 / .sh         §2 consistent browsing session
+├── app-vpn.ps1 / .sh            §3 desktop app / CLI session
+├── webrtc-leak-test.html        §4 WebRTC test page
+├── auto-select-node.ps1         §6 node selection (Windows)
+├── residential-asn.txt          optional: your own residential ASN list
+├── field-report.ps1 / .sh       §7 environment comparison: generate a report
+├── compare-reports.ps1          §7 environment comparison: compare reports
+├── 一键体检.cmd / .command      §7 environment comparison: double-click entry
+├── shortcuts/                   §5 per-country shortcuts, plus launch-claude-desktop.cmd
+├── tests/                       regression tests (CI runs them too)
+└── assets/                      README cover image
+```
+
+The main scripts live at the root on purpose: they read `webrtc-leak-test.html` and
+`residential-asn.txt` from their own directory, and `browse-vpn` creates its Chrome profile
+directories (`chrome-XX-profile/`) there too. **Don't move the main scripts into a subfolder** —
+they would lose those two files and start a fresh, empty Chrome profile, logging you out of everything.
+
 ## Usage
 
 ### 1. `vpn-leak-audit` — one-shot leak audit (read-only, changes nothing)
@@ -168,7 +191,7 @@ Re-run after switching nodes or countries.
 > as a weighted score. **The same exit can therefore get different verdicts from the two tools** —
 > measured examples: a 32-bit ASN whose org name carries a carrier word reads `unrecognized` in
 > the selector but "inferred datacenter" in the audit; a 16-bit ASN whose org name contains
-> `Hosting` goes the other way. All the two share is the ASN list, and `verify-unix.sh` check #11
+> `Hosting` goes the other way. All the two share is the ASN list, and `tests/verify-unix.sh` check #11
 > mechanically proves that list has not drifted.
 
 > **Desktop-app / CLI exit test** (check #2): fires a request via `curl --noproxy '*'` to
@@ -367,9 +390,14 @@ front-end, no external dependencies beyond public STUN servers, uploads nothing.
 
 ### 5. Per-country shortcuts (Windows, double-click / no arguments to remember)
 
-`browse-jp` Japan · `browse-us` US · `browse-sg` Singapore · `browse-hk` Hong Kong ·
-`browse-gb` UK · `browse-de` Germany · `browse-kr` Korea.
+In the `shortcuts/` folder: `browse-jp` Japan · `browse-us` US · `browse-sg` Singapore ·
+`browse-hk` Hong Kong · `browse-gb` UK · `browse-de` Germany · `browse-kr` Korea.
 Each is equivalent to `browse-vpn.ps1 -Country XX` and supports `-DryRun`.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\shortcuts\browse-jp.ps1 -DryRun
+```
+The `launch-claude-desktop.cmd` next to them is a double-click equivalent of
+`app-vpn.ps1 claude-desktop -SystemTz` (see §3).
 On macOS / Linux just pass the country code (`./browse-vpn.sh jp`) — no shortcut files needed.
 
 **Built-in presets** (timezone + language): JP / KR / SG / HK / TW / GB / DE / FR / NL / US /
@@ -466,7 +494,7 @@ powershell -ExecutionPolicy Bypass -File .\auto-select-node.ps1 -NoSpeedTest    
 > above AS200000), a hosting word in the org name +3 (**enough on its own**), a European RIPE
 > range landing in APAC +2, an unregistered RIR placeholder AS-NAME +1, a carrier word **−3**.
 > The allocation-era term cannot rot; **the two word lists can** — which is why
-> `verify-classifier.sh` keeps dedicated sentinels for them. Run it before touching either list.
+> `tests/verify-classifier.sh` keeps dedicated sentinels for them. Run it before touching either list.
 >
 > **The drop is *relative***: a datacenter node is removed only while the pool still holds a
 > non-datacenter one. If everything classifies as datacenter the gate stands down entirely,
@@ -559,7 +587,7 @@ powershell -ExecutionPolicy Bypass -File .\compare-reports.ps1 .\reports\*.txt
 
 > **The report generator is at parity on both platforms** (`.cmd` / `.command`,
 > `-Export` / `--export`), and the two exports use **byte-identical key names** — enforced as a
-> hard gate by section E of `verify-classifier.sh`. If either side's keys drift, the comparison
+> hard gate by section E of `tests/verify-classifier.sh`. If either side's keys drift, the comparison
 > silently drops that row, so it has to be mechanically guaranteed rather than remembered.
 >
 > ⚠️ **The comparison side (`compare-reports.ps1`) is Windows-only.** That is deliberate: reports

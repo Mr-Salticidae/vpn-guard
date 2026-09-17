@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # verify-classifier.sh — 出口归属分类器的回归测试
 #
-# 用法：bash ./verify-classifier.sh
+# 用法：bash tests/verify-classifier.sh   （任意目录下运行均可，脚本会先切到仓库根目录）
 # 只读：不联网、不改任何设置、不启动浏览器。全部判定都是纯函数比对。
 #
 # 为什么单独一个文件而不是塞进 verify-unix.sh：
@@ -19,7 +19,8 @@
 #
 # 自检过：三种投毒都能抓到 —— 改判定阈值、往机房词表加裸词 data、只改一版的措辞。
 
-cd "$(dirname "$0")" || exit 1
+# 被测脚本都在仓库根目录，本文件在 tests/ 下，所以切到上一级。
+cd "$(dirname "$0")/.." || exit 1
 
 pass=0; fail=0; skip=0
 ok(){    echo "  [PASS] $1"; pass=$((pass+1)); }
