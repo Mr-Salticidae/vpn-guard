@@ -33,7 +33,8 @@ jobs:
         run: |
           $out = powershell -NoProfile -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Country US -DryRun | Out-String
           $out
-          if ($out -notmatch 'Eastern Standard Time') { Write-Host 'browse-vpn did not decide a time zone'; exit 1 }
+          # 不写死 Eastern：探测成功时脚本会按 runner 出口的 IANA 时区细分（实测 Des Moines → Central）
+          if ($out -notmatch 'Standard Time \(UTC') { Write-Host 'browse-vpn did not decide a time zone'; exit 1 }
 
       - name: browse-vpn -RestoreTz（无记录时安全退出、不改时区）
         shell: powershell
