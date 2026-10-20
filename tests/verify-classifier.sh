@@ -346,6 +346,89 @@ else
     fi
 fi
 
+# =============================================================================
+# F. DNS 解析器三级判定（DNS-CLASS 块）：ok / public / leak
+# 起因：2026-10-20 实测，国内运营商泄露修好后，节点上游的 Google 任播 DNS 仍被标成
+# 与「中国移动」同级的 FAIL，用户误以为没修好。公共 DNS 不暴露真实 ISP，只该是 WARN。
+# 字段：解析器国家 | 解析器 asn 字段 | 出口国 | 期望判定 | 说明
+# =============================================================================
+echo; echo "==== F) DNS 解析器三级判定 ===="
+cat > "$TMP/dnsfix" <<'DNSEOF'
+JP|AS13335 CloudFlare Inc|JP|ok|Cloudflare 在出口国
+US|AS15169 Google LLC|JP|public|Google 任播在美国（节点上游）——降级为公共 DNS
+NL|AS19281 Quad9|JP|public|Quad9
+US|AS36692 Cisco OpenDNS, LLC|JP|public|OpenDNS
+CN|AS9808 China Mobile Communications Group Co. Ltd.|JP|leak|中国移动 —— 真泄露
+CN|AS4134 CHINANET|JP|leak|中国电信 —— 真泄露
+US|AS151690 Not Google|JP|leak|整词匹配：151690 不得被 15169 子串命中
+US||JP|leak|缺 asn 字段不得被当成公共 DNS（落在安全方向）
+CN|AS9808 China Mobile|CN|ok|出口就在该国 —— 不算泄露
+US|AS15169 Google LLC||ok|出口国未知 —— 无从比较
+jp|AS2516 KDDI|JP|leak|未大写的国家码按原样比较（大写化由调用方负责，两版须一致）
+DNSEOF
+
+if ! grep -q 'DNS-CLASS-BEGIN' vpn-leak-audit.sh 2>/dev/null; then
+    no "vpn-leak-audit.sh 里找不到 DNS-CLASS-BEGIN 标记"
+else
+    awk '/DNS-CLASS-BEGIN/,/DNS-CLASS-END/' vpn-leak-audit.sh > "$TMP/dblk.sh"
+    {
+        echo 'ok(){ printf "OK|%s\n" "$1"; }'
+        echo 'warn(){ printf "WARN|%s\n" "$1"; }'
+        echo 'info(){ printf "INFO|%s\n" "$1"; }'
+        echo 'bad(){ printf "BAD|%s\n" "$1"; }'
+        while IFS='|' read -r f_cc f_asn f_exit f_exp f_name; do
+            [ -z "$f_exp" ] && continue
+            echo "rip='192.0.2.1'; rcc='$f_cc'; rname='X'; rasn='$f_asn'; up_exit='$f_exit'; exit_name='Y'"
+            cat "$TMP/dblk.sh"
+            echo 'printf "VERDICT|%s\n" "$dns_verdict"'
+        done < "$TMP/dnsfix"
+    } > "$TMP/dharn.sh"
+    bash "$TMP/dharn.sh" > "$TMP/dout.sh" 2>"$TMP/derr.sh"
+    if [ -s "$TMP/derr.sh" ]; then
+        no "bash DNS 判定块执行报错"; sed 's/^/      /' "$TMP/derr.sh" | head -5
+    fi
+    grep '^VERDICT|' "$TMP/dout.sh" | cut -d'|' -f2 > "$TMP/dgot.sh"
+    idx=0
+    while IFS='|' read -r f_cc f_asn f_exit f_exp f_name; do
+        [ -z "$f_exp" ] && continue
+        idx=$((idx+1))
+        got=$(sed -n "${idx}p" "$TMP/dgot.sh")
+        if [ "$got" = "$f_exp" ]; then ok "$f_name"; else no "$f_name —— 期望 ${f_exp}，实得 ${got:-<空>}"; fi
+    done < "$TMP/dnsfix"
+
+    if [ -z "$PS" ]; then
+        skipm "未找到 PowerShell —— 跳过 DNS 判定跨语言比对"
+    elif ! grep -q 'DNS-CLASS-BEGIN' vpn-leak-audit.ps1 2>/dev/null; then
+        no "vpn-leak-audit.ps1 里找不到 DNS-CLASS-BEGIN 标记"
+    else
+        awk '/DNS-CLASS-BEGIN/,/DNS-CLASS-END/' vpn-leak-audit.ps1 | tr -d '\r' > "$TMP/dblk.ps1"
+        printf '\357\273\277' > "$TMP/dharn.ps1"
+        {
+            echo '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8'
+            echo 'function Ok($m){Write-Host "OK|$m"}'
+            echo 'function Warn($m){Write-Host "WARN|$m"}'
+            echo 'function Info($m){Write-Host "INFO|$m"}'
+            echo 'function Bad($m){Write-Host "BAD|$m"}'
+            while IFS='|' read -r f_cc f_asn f_exit f_exp f_name; do
+                [ -z "$f_exp" ] && continue
+                echo "\$rip='192.0.2.1'; \$rcc='$f_cc'; \$rname='X'; \$rasn='$f_asn'; \$upExit='$f_exit'; \$exitName='Y'"
+                cat "$TMP/dblk.ps1"
+                echo 'Write-Host "VERDICT|$dnsVerdict"'
+            done < "$TMP/dnsfix"
+        } >> "$TMP/dharn.ps1"
+        "$PS" -NoProfile -ExecutionPolicy Bypass -File "$TMP/dharn.ps1" > "$TMP/dout.ps1" 2>"$TMP/derr.ps1"
+        tr -d '\r' < "$TMP/dout.ps1" > "$TMP/da"
+        if [ -s "$TMP/derr.ps1" ]; then
+            no "PowerShell DNS 判定块执行报错"; sed 's/^/      /' "$TMP/derr.ps1" | head -5
+        elif diff -q "$TMP/da" "$TMP/dout.sh" >/dev/null 2>&1; then
+            ok "DNS 判定两版输出逐字节一致（$(grep -c . "$TMP/da") 行）"
+        else
+            no "DNS 判定两版输出不一致"
+            diff "$TMP/da" "$TMP/dout.sh" | head -12 | sed 's/^/      /'
+        fi
+    fi
+fi
+
 echo; echo "============================================"
 echo "  结果：PASS=$pass  FAIL=$fail  SKIP=$skip"
 if [ "$fail" -eq 0 ]; then

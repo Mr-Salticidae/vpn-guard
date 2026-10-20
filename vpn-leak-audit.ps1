@@ -98,23 +98,45 @@ function Invoke-DnsLeakTest($exitCc, $exitName) {
     }
     $upExit = ("$exitCc").ToUpper()
     $dns = @($res | Where-Object { $_.type -eq 'dns' })
-    $mismatch = 0
+    $leak = 0; $public = 0
     foreach ($d in $dns) {
-        $rcc = ("$($d.country)").ToUpper()
-        if ($upExit -and $rcc -and $rcc -ne $upExit) {
-            $mismatch++
-            Bad ("解析器 {0}（{1} / {2}）不在出口国 {3} —— DNS 正泄露到此解析器" -f $d.ip, $d.country_name, $d.asn, $exitName)
+        $rip = $d.ip; $rcc = ("$($d.country)").ToUpper(); $rname = $d.country_name; $rasn = "$($d.asn)"
+        # DNS-CLASS-BEGIN
+        # 单个解析器的三级判定（纯逻辑，tests/verify-classifier.sh F 段抽出来与 .sh 版逐字节比对）：
+        #   ok     —— 在出口国（或出口国未知，无从比较）
+        #   public —— 不在出口国，但属于任播公共 DNS（Google/Cloudflare/Quad9/OpenDNS）。
+        #             这通常是节点服务器的上游 DNS：fake-ip 下域名原样交给节点解析，
+        #             由它的上游在就近 PoP 递归。它不暴露你的真实 ISP，只是「DNS 不在出口国」的弱信号。
+        #   leak   —— 不在出口国且是普通运营商 —— 真泄露，多半就是你本地的 ISP。
+        # 名单两端加空格做整词匹配，防止 AS151690 这类号被 15169 子串误命中。
+        $PublicDnsAsn = ' 15169 13335 19281 36692 '
+        $dnsAsnNum = ''
+        if ($rasn -match '^\s*AS(\d+)') { $dnsAsnNum = $Matches[1] }
+        # -ceq 而非 -eq：PowerShell 的 -eq 不区分大小写而 bash 的 = 区分，两版必须同一语义
+        if (-not $upExit -or -not $rcc -or $rcc -ceq $upExit) {
+            $dnsVerdict = 'ok'
+            Info ("解析器 {0}（{1} / {2}）" -f $rip, $rname, $rasn)
+        } elseif ($dnsAsnNum -and $PublicDnsAsn.Contains(" $dnsAsnNum ")) {
+            $dnsVerdict = 'public'
+            Warn ("解析器 {0}（{1} / {2}）是公共 DNS，不在出口国 {3} —— 不暴露真实 ISP，多为节点上游所致" -f $rip, $rname, $rasn, $exitName)
         } else {
-            Info ("解析器 {0}（{1} / {2}）" -f $d.ip, $d.country_name, $d.asn)
+            $dnsVerdict = 'leak'
+            Bad ("解析器 {0}（{1} / {2}）不在出口国 {3} —— DNS 正泄露到此解析器" -f $rip, $rname, $rasn, $exitName)
         }
+        # DNS-CLASS-END
+        if ($dnsVerdict -eq 'leak') { $leak++ } elseif ($dnsVerdict -eq 'public') { $public++ }
     }
     if ($dns.Count -eq 0) {
         Warn "未观察到实际解析器（可能全部命中缓存或被完全隧道）——可稍后重试确认"
-    } elseif ($mismatch -eq 0) {
-        Ok ("全部解析器都在出口国 {0} —— DNS 未泄露" -f $exitName)
-    } else {
-        Bad ("共 {0}/{1} 个解析器不在出口国 —— 你查询的域名正暴露给上述解析器（多为真实 ISP）" -f $mismatch, $dns.Count)
+    } elseif ($leak -gt 0) {
+        Bad ("共 {0}/{1} 个解析器属于出口国之外的运营商 —— 你查询的域名正暴露给它们（多为你本地的真实 ISP）" -f $leak, $dns.Count)
         Info "修复：客户端启用 fake-ip + 远端解析（让 DNS 走隧道在出口解析），并确认没有应用绕过隧道直连本地 DNS。"
+        Info "      Windows 上还要开 TUN 的 strict-route —— 否则系统会把同一条查询并发发给实体网卡的 DNS。"
+    } elseif ($public -gt 0) {
+        Warn ("未发现漏到运营商的解析器；但 {0}/{1} 个是出口国之外的公共 DNS 节点 —— 节点服务器的上游配置所致，本机改不了" -f $public, $dns.Count)
+        Info "      不暴露你的真实位置，只是「DNS 不在出口国」的弱信号。介意就换一个上游在当地解析的节点。"
+    } else {
+        Ok ("全部解析器都在出口国 {0} —— DNS 未泄露" -f $exitName)
     }
 }
 

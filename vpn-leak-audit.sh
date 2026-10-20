@@ -178,7 +178,7 @@ dns_leak_test() {
         exit_name=$(printf '%s' "$rows"| grep '"type":"ip"' | head -1 | sed -E 's/.*"country_name":"([^"]*)".*/\1/')
     fi
     local up_exit; up_exit=$(printf '%s' "$exit_cc" | tr '[:lower:]' '[:upper:]')
-    local dns_count=0 mismatch=0
+    local dns_count=0 leak=0 public=0
     while IFS= read -r obj; do
         case "$obj" in *'"type":"dns"'*) ;; *) continue ;; esac
         local rip rcc rname rasn
@@ -187,22 +187,40 @@ dns_leak_test() {
         rname=$(printf '%s' "$obj" | sed -E 's/.*"country_name":"([^"]*)".*/\1/')
         rasn=$(printf '%s'  "$obj" | sed -E 's/.*"asn":"([^"]*)".*/\1/')
         dns_count=$((dns_count + 1))
-        if [ -n "$up_exit" ] && [ -n "$rcc" ] && [ "$rcc" != "$up_exit" ]; then
-            mismatch=$((mismatch + 1))
-            bad "解析器 ${rip}（$rname / ${rasn}）不在出口国 $exit_name —— DNS 正泄露到此解析器"
+        # DNS-CLASS-BEGIN
+        # 单个解析器的三级判定，与 .ps1 版逐字节对等（tests/verify-classifier.sh F 段）：
+        #   ok / public（任播公共 DNS，多为节点上游，不暴露真实 ISP）/ leak（运营商，真泄露）
+        # 名单两端加空格做整词匹配，防止 AS151690 这类号被 15169 子串误命中。
+        PUBLIC_DNS_ASN=' 15169 13335 19281 36692 '
+        dns_asn_num=$(printf '%s' "$rasn" | sed -nE 's/^[[:space:]]*AS([0-9]+).*/\1/p')
+        if [ -z "$up_exit" ] || [ -z "$rcc" ] || [ "$rcc" = "$up_exit" ]; then
+            dns_verdict=ok
+            info "解析器 ${rip}（${rname} / ${rasn}）"
+        elif [ -n "$dns_asn_num" ] && case "$PUBLIC_DNS_ASN" in *" ${dns_asn_num} "*) true ;; *) false ;; esac; then
+            dns_verdict=public
+            warn "解析器 ${rip}（${rname} / ${rasn}）是公共 DNS，不在出口国 ${exit_name} —— 不暴露真实 ISP，多为节点上游所致"
         else
-            info "解析器 ${rip}（$rname / ${rasn}）"
+            dns_verdict=leak
+            bad "解析器 ${rip}（${rname} / ${rasn}）不在出口国 ${exit_name} —— DNS 正泄露到此解析器"
         fi
+        # DNS-CLASS-END
+        case "$dns_verdict" in
+            leak)   leak=$((leak + 1)) ;;
+            public) public=$((public + 1)) ;;
+        esac
     done <<EOF
 $rows
 EOF
     if [ "$dns_count" -eq 0 ]; then
         warn "未观察到实际解析器（可能全部命中缓存或被完全隧道）——可稍后重试确认"
-    elif [ "$mismatch" -eq 0 ]; then
-        ok "全部解析器都在出口国 $exit_name —— DNS 未泄露"
-    else
-        bad "共 $mismatch/$dns_count 个解析器不在出口国 —— 你查询的域名正暴露给上述解析器（多为真实 ISP）"
+    elif [ "$leak" -gt 0 ]; then
+        bad "共 ${leak}/${dns_count} 个解析器属于出口国之外的运营商 —— 你查询的域名正暴露给它们（多为你本地的真实 ISP）"
         info "修复：客户端启用 fake-ip + 远端解析（让 DNS 走隧道在出口解析），并确认没有应用绕过隧道直连本地 DNS。"
+    elif [ "$public" -gt 0 ]; then
+        warn "未发现漏到运营商的解析器；但 ${public}/${dns_count} 个是出口国之外的公共 DNS 节点 —— 节点服务器的上游配置所致，本机改不了"
+        info "      不暴露你的真实位置，只是「DNS 不在出口国」的弱信号。介意就换一个上游在当地解析的节点。"
+    else
+        ok "全部解析器都在出口国 ${exit_name} —— DNS 未泄露"
     fi
 }
 find_chrome() {
