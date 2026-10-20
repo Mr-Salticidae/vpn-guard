@@ -1,6 +1,9 @@
 # 独立 Chrome 会话配置（含浏览数据/cookie，绝不入库）
 chrome-*-profile/
 
+# browse-vpn.ps1 会话前记录的原系统时区（本机状态）
+.browse-vpn-tz-restore
+
 # 临时/日志
 *.log
 *.tmp

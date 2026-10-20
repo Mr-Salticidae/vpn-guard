@@ -1,6 +1,6 @@
 name: verify
 
-# 在真实的云端 macOS / Linux 上验证 Unix 版脚本。
+# 在真实的云端 macOS / Linux / Windows 上验证脚本。
 # 作者本地是 Windows，无 Mac/Linux 设备，靠这条流水线做真机回归。
 
 on:
@@ -10,6 +10,40 @@ on:
   workflow_dispatch:
 
 jobs:
+  # 真 Windows PowerShell 5.1 —— 作者和大多数用户实际跑 .ps1 的环境。
+  # ubuntu/macos 上的 pwsh 是 7.x，与 5.1 的解析与编码行为不同，替代不了这一路。
+  # 起因：v1.2.0 的 vpn-leak-audit.ps1 第 358 行在双引号串里嵌了全角引号，5.1 把它当字符串定界符，
+  # 整个脚本运行即报「DoH 未识别」，而这条流水线当时只有 Unix job，没能拦住。
+  windows-ps51:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: PS 5.1 语法 + 全角引号定界符检查（硬闸门）
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\lint-ps1.ps1
+
+      # 同一份分类器回归，换成 Windows PowerShell 5.1 做跨语言比对（Unix job 用的是 pwsh 7）
+      - name: 分类器行为回归（Git Bash + Windows PowerShell 5.1，硬闸门）
+        shell: bash
+        run: bash tests/verify-classifier.sh
+
+      - name: browse-vpn 决策（-DryRun -Country US，不切时区不开浏览器）
+        shell: powershell
+        run: |
+          $out = powershell -NoProfile -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Country US -DryRun | Out-String
+          $out
+          # 不写死 Eastern：探测成功时脚本会按 runner 出口的 IANA 时区细分（实测 Des Moines → Central）
+          if ($out -notmatch 'Standard Time \(UTC') { Write-Host 'browse-vpn did not decide a time zone'; exit 1 }
+
+      - name: browse-vpn -RestoreTz（无记录时安全退出、不改时区）
+        shell: powershell
+        run: |
+          $before = tzutil /g
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -RestoreTz
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ((tzutil /g) -ne $before) { Write-Host 'time zone changed unexpectedly'; exit 1 }
+
   unix:
     strategy:
       fail-fast: false

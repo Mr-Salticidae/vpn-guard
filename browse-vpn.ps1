@@ -13,6 +13,11 @@
         # 客户端只开了本地端口（如 v2rayN 默认 10808）而没开系统代理/TUN 时，让 Chrome 直接走该端口
     powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -LockOnly
         # 只回写语言/locale 偏好（修复旧配置残留的中文指纹），不切时区、不启动浏览器
+    powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -RestoreTz
+        # 会话窗口被强关 / 断电导致系统时区没切回来时，按会话前的记录一键还原
+
+  注意（Windows）：Chrome 在 Windows 上不认 TZ 环境变量，所以本脚本切的是【整台电脑的系统时区】，
+        会话期间任务栏时钟和其它软件都会跟着变；关闭该 Chrome 窗口后自动还原。
 #>
 
 param(
@@ -20,9 +25,30 @@ param(
     [string]$Proxy   = "",   # 传给 Chrome --proxy-server，如 socks5://127.0.0.1:10808
     [switch]$WebRTC,         # 附带打开 WebRTC 泄露主动检测页
     [switch]$LockOnly,       # 只回写语言/locale 偏好，不切时区、不启动浏览器（修复旧配置用）
+    [switch]$RestoreTz,      # 只把系统时区还原到上次会话前记录的值（窗口被强关、时区没回来时用）
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
+
+# 会话前的原时区记录：切换前写入，正常还原后删除（.gitignore 已排除）
+$TzStateFile = Join-Path $PSScriptRoot '.browse-vpn-tz-restore'
+if ($RestoreTz) {
+    if (Test-Path -LiteralPath $TzStateFile) {
+        $saved = ([System.IO.File]::ReadAllText($TzStateFile)).Trim()
+        tzutil /s $saved
+        $now = (tzutil /g)
+        if ($now -eq $saved) {
+            Remove-Item -LiteralPath $TzStateFile -Force -ErrorAction SilentlyContinue
+            Write-Host ("系统时区已还原为: {0}" -f $now) -ForegroundColor Green
+            exit 0
+        }
+        Write-Host ("还原失败：当前仍是 {0}，记录的原时区是 {1}。可手动执行 tzutil /s `"{1}`"" -f $now, $saved) -ForegroundColor Red
+        exit 1
+    }
+    Write-Host ("没有待还原的记录（上次会话已正常还原）。当前系统时区: {0}" -f (tzutil /g)) -ForegroundColor Gray
+    Write-Host "  若确实不对，可手动执行：tzutil /s `"China Standard Time`"（换成你本来的时区）" -ForegroundColor DarkGray
+    exit 0
+}
 
 # 自动定位 Chrome；$BaseDir 取脚本所在目录，克隆到任意位置都能直接用
 $Chrome = @(
@@ -237,12 +263,25 @@ Write-Host "已锁定浏览器语言/locale：$lang（每次启动回写，覆�
 if ($LockOnly) { Write-Host "[LockOnly] 偏好已回写，未切时区、未启动浏览器。" -ForegroundColor Magenta; exit 0 }
 
 # ---- 5) 切时区 → 启动 → 关闭后还原 ----
+# 注意：Windows 版切的是【整台电脑的系统时区】（Chrome 在 Windows 上不认 TZ 环境变量），
+# 会话期间任务栏时钟、其它软件、日志时间戳都会跟着走；Unix 版只给 Chrome 进程注入 TZ，不动系统。
+# 原时区先落盘到 $TzStateFile 再切换：若本窗口被强关 / 断电，finally 来不及跑，
+# 下次启动或 -RestoreTz 会读这个文件还原 —— 否则下次会把「已经被切走的时区」当成原时区，永远回不去。
 $origTZ = (tzutil /g)
+if (Test-Path -LiteralPath $TzStateFile) {
+    $saved = ([System.IO.File]::ReadAllText($TzStateFile)).Trim()
+    if ($saved) {
+        Write-Host ("检测到上次会话未正常还原时区（当前 {0}），以记录的原时区 {1} 为准。" -f $origTZ, $saved) -ForegroundColor Yellow
+        $origTZ = $saved
+    }
+}
+[System.IO.File]::WriteAllText($TzStateFile, $origTZ, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host ("当前系统时区: {0}" -f $origTZ) -ForegroundColor Gray
 try {
     tzutil /s $winTz
-    Write-Host ("已临时切换到: {0}（会话期间系统钟随出口国走，属正常）" -f $winTz) -ForegroundColor Yellow
-    Write-Host "正在启动一致性 Chrome 会话……关闭该 Chrome 窗口后时区会自动还原。" -ForegroundColor Cyan
+    Write-Host ("已临时把【整台电脑的系统时区】切到: {0} —— 窗口关闭前，任务栏时钟和其它软件都按这个时区显示" -f $winTz) -ForegroundColor Yellow
+    Write-Host "正在启动一致性 Chrome 会话……关闭该 Chrome 窗口后时区会自动还原。请勿先关掉本 PowerShell 窗口。" -ForegroundColor Cyan
+    Write-Host ("万一时区没回来：powershell -ExecutionPolicy Bypass -File `"{0}`" -RestoreTz" -f $PSCommandPath) -ForegroundColor DarkGray
     $args = @("--user-data-dir=$profileDir", "--lang=$($lang.Split(',')[0])", "--accept-lang=$lang", "--no-first-run", "--no-default-browser-check")
     if ($Proxy) { $args += "--proxy-server=$Proxy" }
     if ($WebRTC) {
@@ -258,7 +297,9 @@ try {
 }
 finally {
     tzutil /s $origTZ
-    Write-Host ("时区已还原为: {0}" -f (tzutil /g)) -ForegroundColor Green
+    $now = (tzutil /g)
+    if ($now -eq $origTZ) { Remove-Item -LiteralPath $TzStateFile -Force -ErrorAction SilentlyContinue }
+    Write-Host ("时区已还原为: {0}" -f $now) -ForegroundColor Green
 }
 Write-Host "会话结束。建议关闭前在目标平台点一次登出，避免会话 cookie 跨时区复用。" -ForegroundColor DarkGray
 
