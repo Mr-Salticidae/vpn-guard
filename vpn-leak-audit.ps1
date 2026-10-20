@@ -8,12 +8,34 @@
   用法：右键“用 PowerShell 运行”，或在终端执行  powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1
         加 -NoDnsLeak   可跳过联网的 DNS 泄露主动实测（默认开启，走 bash.ws）。
         加 -NoSpeedTest 可跳过链路质量实测（默认开启，约 20MB 流量）。
+        加 -LogFile <路径> 把整份输出另存为 UTF-8 文本（无 BOM，方便发给别人或交给 AI 读；
+                           不要用 *> 重定向 —— PS 5.1 会存成 UTF-16，多数工具读出来是乱码）。
   只读检查，不修改任何系统设置。
 #>
 
-param([switch]$NoDnsLeak, [switch]$NoSpeedTest, [string]$Export = '')
+param([switch]$NoDnsLeak, [switch]$NoSpeedTest, [string]$Export = '', [string]$LogFile = '')
 
 $ErrorActionPreference = 'SilentlyContinue'
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+# -LogFile：同名函数优先于 cmdlet，这里包一层 Write-Host —— 屏幕照旧上色输出，同时收集纯文本。
+# 全文在脚本末尾一次性写出（UTF-8 无 BOM）。
+$script:LogLines = New-Object System.Collections.Generic.List[string]
+$script:LogPending = ''
+if ($LogFile) {
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)][object[]]$Object,
+              [ConsoleColor]$ForegroundColor, [ConsoleColor]$BackgroundColor, [switch]$NoNewline, [object]$Separator = ' ')
+        $p = @{}
+        foreach ($k in 'ForegroundColor', 'BackgroundColor', 'NoNewline', 'Separator') {
+            if ($PSBoundParameters.ContainsKey($k)) { $p[$k] = $PSBoundParameters[$k] }
+        }
+        if ($null -ne $Object) { $p['Object'] = $Object }
+        Microsoft.PowerShell.Utility\Write-Host @p
+        $text = if ($null -eq $Object) { '' } else { ($Object | ForEach-Object { "$_" }) -join "$Separator" }
+        if ($NoNewline) { $script:LogPending += $text }
+        else { $script:LogLines.Add($script:LogPending + $text); $script:LogPending = '' }
+    }
+}
 function Line($c='-'){ Write-Host ($c * 60) -ForegroundColor DarkGray }
 function Ok($m){ Write-Host "  [ OK ] $m" -ForegroundColor Green }
 function Warn($m){ Write-Host "  [WARN] $m" -ForegroundColor Yellow }
@@ -340,7 +362,7 @@ if ($ipapi -and $ipapi.status -eq 'success') {
     } else {
         $diff = ($ipapi.offset - $sysOffset)/3600
         Bad ("时区不一致，差 {0:+0;-0} 小时 —— 这是平台判定'你在用 VPN'的头号依据" -f $diff)
-        Info ("修复（浏览器）  ：browse-vpn.ps1 —— 自动切到出口国时区，关闭浏览器后还原")
+        Info ("修复（浏览器）  ：browse-vpn.ps1 —— 会话期间把【整台电脑的系统时区】切到出口国，关闭该 Chrome 后还原")
         Info ("修复（桌面/CLI）：app-vpn.ps1 <应用> —— Node 类程序进程级注入 TZ；")
         Info ("                  Electron GUI 不认 TZ，需加 -SystemTz 临时切系统时区")
     }
@@ -378,6 +400,60 @@ if ($TakeoverMode -eq 'sysproxy') {
     Info "当前为系统代理模式：浏览器把域名交给代理远端解析，本地 DNS 主要影响直连/不走代理的应用。"
 }
 Info "提示：确认 Chrome 已关闭「安全 DNS(DoH)」，否则浏览器会绕过 VPN 自行解析。"
+
+# ---- Clash Verge Rev 配置诊断（只读）：把「DNS 泄露」翻译成该点哪个开关 ----
+# 起因：2026-10-20 实测，泄露的两个真因都藏在客户端配置里 —— DNS 覆写没开导致内核 dns 段
+# 没有 nameserver（退回内置默认解析器），以及 TUN 未开 strict-route（Windows 把查询并发发给实体网卡）。
+# 这里只读三个文件，不改任何东西；找不到 Clash Verge 就整段跳过。
+$cvDir = Join-Path $env:APPDATA 'io.github.clash-verge-rev.clash-verge-rev'
+$cvVerge = Join-Path $cvDir 'verge.yaml'
+$cvKernel = Join-Path $cvDir 'clash-verge.yaml'
+if ((Test-Path -LiteralPath $cvVerge) -and (Test-Path -LiteralPath $cvKernel)) {
+    function Get-YamlTopBlock([string]$Text, [string]$Key) {
+        # 取顶层键 $Key: 下的缩进块（到下一个顶层键为止）；够用即可，不是通用 YAML 解析器
+        $m = [regex]::Match($Text, "(?ms)^$([regex]::Escape($Key)):[^\n]*\n(.*?)(?=^\S|\z)")
+        if ($m.Success) { return $m.Groups[1].Value } else { return '' }
+    }
+    $vText = [System.IO.File]::ReadAllText($cvVerge)
+    $kText = [System.IO.File]::ReadAllText($cvKernel)
+    $cvOverride = 'off'
+    if ($vText -match '(?m)^enable_dns_settings:\s*true') { $cvOverride = 'on' }
+    if ((Get-YamlTopBlock $vText 'profile_dns_settings') -match '(?m)^\s+enabled:\s*true') { $cvOverride = 'on' }
+    $kDns = Get-YamlTopBlock $kText 'dns'
+    # ^\s+nameserver: 不会命中 default-nameserver / proxy-server-nameserver（前面有连字符前缀）
+    $cvHasNs = if ($kDns -match '(?m)^\s+nameserver:\s*(\[\s*\S|$)' -and $kDns -notmatch '(?m)^\s+nameserver:\s*\[\s*\]') { 'yes' } else { 'no' }
+    $kTun = Get-YamlTopBlock $kText 'tun'
+    $cvTun = if ($kTun -match '(?m)^\s+enable:\s*true') { 'true' } else { 'false' }
+    $cvStrict = if ($kTun -match '(?m)^\s+strict-route:\s*true') { 'true' } else { 'false' }
+    # 实体网卡上是否还配着 DNS：有，strict-route 关闭时 Windows 才会并发查询绕过隧道
+    $cvPhysDns = 'no'
+    foreach ($d in $dns) {
+        if ($d.InterfaceAlias -notmatch $tunPat -and $d.InterfaceAlias -notmatch 'Loopback') { $cvPhysDns = 'yes' }
+    }
+    Write-Host ""
+    # CV-DIAG-BEGIN
+    # 纯判定（tests/verify-classifier.sh G 段与 .sh 版逐字节比对）。输入四个字符串事实：
+    #   $cvOverride on/off · $cvHasNs yes/no · $cvTun/$cvStrict true/false · $cvPhysDns yes/no
+    if ($cvHasNs -eq 'no') {
+        Bad "Clash Verge：内核生效配置的 dns 段没有 nameserver —— mihomo 会退回内置默认解析器，查询可能明文漏回本地 ISP"
+        if ($cvOverride -eq 'off') {
+            Info "      修复：设置 → 「DNS 覆写」打开（填加密 DNS，如 https://1.1.1.1/dns-query），保存后内核自动重启"
+        } else {
+            Info "      修复：DNS 覆写已开，但里面没填 nameserver —— 在 设置 → DNS 覆写 里补上加密 DNS"
+        }
+    } elseif ($cvOverride -eq 'off') {
+        Info "Clash Verge：DNS 覆写未开启，正在用订阅自带的 DNS（已有 nameserver）。若上面实测仍有泄露，打开 设置 → DNS 覆写 统一改成加密 DNS"
+    } else {
+        Ok "Clash Verge：DNS 覆写已开启，内核已加载 nameserver"
+    }
+    if ($cvTun -eq 'true' -and $cvStrict -ne 'true' -and $cvPhysDns -eq 'yes') {
+        Warn "Clash Verge：TUN 未开严格路由（strict-route）—— 系统会把同一条 DNS 查询并发发给实体网卡上的 DNS，绕过隧道"
+        Info "      修复：设置 → TUN 模式旁的齿轮 → 「严格路由」打开 → 保存"
+    } elseif ($cvTun -eq 'true' -and $cvStrict -eq 'true') {
+        Ok "Clash Verge：TUN 已开严格路由（strict-route），实体网卡的 DNS 绕不过隧道"
+    }
+    # CV-DIAG-END
+}
 if (-not $NoDnsLeak) {
     Write-Host ""
     Info "主动实测（触发真实解析，看解析器归属国 · 联网 bash.ws，约 10s；-NoDnsLeak 可跳过）……"
@@ -554,7 +630,10 @@ if ($Export) {
     try {
         $dir = Split-Path -Parent $Export
         if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        Set-Content -Path $Export -Value ($lines -join "`r`n") -Encoding UTF8
+        # UTF-8 无 BOM：PS 5.1 的 Set-Content -Encoding UTF8 会加 BOM，部分工具/AI 会把它读成乱码首字符。
+        # compare-reports.ps1 用 Get-Content -Encoding UTF8 读取，有无 BOM 都能正确解码。
+        $full = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine((Get-Location).ProviderPath, $Export))
+        [System.IO.File]::WriteAllText($full, ($lines -join "`r`n") + "`r`n", $Utf8NoBom)
         Ok ("对照报告已导出：{0}" -f $Export)
     } catch {
         Bad ("导出失败：{0}" -f $_.Exception.Message)
@@ -562,3 +641,17 @@ if ($Export) {
 }
 
 
+
+# ---------- -LogFile：整份输出另存为 UTF-8（无 BOM）----------
+if ($LogFile) {
+    if ($script:LogPending) { $script:LogLines.Add($script:LogPending) }
+    try {
+        $logFull = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine((Get-Location).ProviderPath, $LogFile))
+        $logDir = Split-Path -Parent $logFull
+        if ($logDir -and -not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+        [System.IO.File]::WriteAllText($logFull, (($script:LogLines -join "`r`n") + "`r`n"), $Utf8NoBom)
+        Microsoft.PowerShell.Utility\Write-Host ("  输出已另存（UTF-8）：{0}" -f $logFull) -ForegroundColor DarkGray
+    } catch {
+        Microsoft.PowerShell.Utility\Write-Host ("  [FAIL] 另存输出失败：{0}" -f $_.Exception.Message) -ForegroundColor Red
+    }
+}

@@ -137,6 +137,8 @@ vpn-guard/
 powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1
 powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoDnsLeak    # 跳过 DNS 联网实测
 powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -NoSpeedTest  # 跳过链路质量实测
+powershell -ExecutionPolicy Bypass -File .\vpn-leak-audit.ps1 -LogFile .\audit.txt
+    # 整份输出另存为 UTF-8（无 BOM），方便发给别人或交给 AI 读；别用 *> 重定向（PS 5.1 存成 UTF-16）
 ```
 ```bash
 # macOS / Linux
@@ -224,7 +226,11 @@ powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -Proxy http://127.0.0.
     # 客户端只开本地端口（未开系统代理/TUN）时，让 Chrome 直接走该端口（v2rayN 默认 HTTP 10809）
 powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -WebRTC   # 附带打开 WebRTC 泄露主动检测页
 powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -LockOnly # 只回写语言/locale 偏好，不切时区/不开浏览器
+powershell -ExecutionPolicy Bypass -File .\browse-vpn.ps1 -RestoreTz
+    # 会话窗口被强关 / 断电、系统时区没切回来时，按会话前的记录一键还原
 ```
+
+> **Windows 注意**：Chrome 在 Windows 上不认 `TZ` 环境变量，所以 `browse-vpn.ps1` 切的是**整台电脑的系统时区**——会话期间任务栏时钟、其它软件、日志时间戳都会跟着变，关闭该 Chrome 窗口后自动还原（不要先关后台的 PowerShell 窗口）。macOS / Linux 版只给 Chrome 进程注入 `TZ`，不动系统。
 ```bash
 # macOS / Linux
 ./browse-vpn.sh              # 自动识别当前出口国

@@ -429,6 +429,78 @@ else
     fi
 fi
 
+# =============================================================================
+# G. Clash Verge 配置诊断判定（CV-DIAG 块）
+# 字段：DNS覆写 | 内核有nameserver | TUN | strict-route | 实体网卡有DNS | 期望输出级别序列 | 说明
+# =============================================================================
+echo; echo "==== G) Clash Verge 配置诊断判定 ===="
+cat > "$TMP/cvfix" <<'CVEOF'
+off|no|true|false|yes|BAD,INFO,WARN,INFO|2026-10-20 上午本机真实初态：覆写没开 + 无 nameserver + 未开严格路由
+on|yes|true|true|yes|OK,OK|同一台机修好后的状态
+on|no|true|true|yes|BAD,INFO,OK|覆写开了但没填 nameserver
+off|yes|false|false|yes|INFO|订阅自带 DNS + 系统代理模式（无 TUN 不谈严格路由）
+on|yes|true|false|no|OK|实体网卡无 DNS（macOS/Linux 路径恒为 no）—— 不报严格路由
+on|yes|true|false|yes|OK,WARN,INFO|只差严格路由
+CVEOF
+if ! grep -q 'CV-DIAG-BEGIN' vpn-leak-audit.sh 2>/dev/null; then
+    no "vpn-leak-audit.sh 里找不到 CV-DIAG-BEGIN 标记"
+else
+    awk '/CV-DIAG-BEGIN/,/CV-DIAG-END/' vpn-leak-audit.sh > "$TMP/cvblk.sh"
+    {
+        echo 'ok(){ printf "OK|%s\n" "$1"; }'
+        echo 'warn(){ printf "WARN|%s\n" "$1"; }'
+        echo 'info(){ printf "INFO|%s\n" "$1"; }'
+        echo 'bad(){ printf "BAD|%s\n" "$1"; }'
+        while IFS='|' read -r a b c d e f_exp f_name; do
+            [ -z "$f_exp" ] && continue
+            echo 'echo "== case =="'
+            echo "cvOverride='$a'; cvHasNs='$b'; cvTun='$c'; cvStrict='$d'; cvPhysDns='$e'"
+            cat "$TMP/cvblk.sh"
+        done < "$TMP/cvfix"
+    } > "$TMP/cvharn.sh"
+    bash "$TMP/cvharn.sh" > "$TMP/cvout.sh" 2>"$TMP/cverr.sh"
+    [ -s "$TMP/cverr.sh" ] && { no "bash CV 判定块执行报错"; sed 's/^/      /' "$TMP/cverr.sh" | head -5; }
+    idx=0
+    while IFS='|' read -r a b c d e f_exp f_name; do
+        [ -z "$f_exp" ] && continue
+        idx=$((idx+1))
+        got=$(awk -v n="$idx" '/^== case ==/{c++; next} c==n{split($0,p,"|"); s=s (s?",":"") p[1]} END{print s}' "$TMP/cvout.sh")
+        if [ "$got" = "$f_exp" ]; then ok "$f_name"; else no "$f_name —— 期望 ${f_exp}，实得 ${got:-<空>}"; fi
+    done < "$TMP/cvfix"
+
+    if [ -z "$PS" ]; then
+        skipm "未找到 PowerShell —— 跳过 CV 判定跨语言比对"
+    elif ! grep -q 'CV-DIAG-BEGIN' vpn-leak-audit.ps1 2>/dev/null; then
+        no "vpn-leak-audit.ps1 里找不到 CV-DIAG-BEGIN 标记"
+    else
+        awk '/CV-DIAG-BEGIN/,/CV-DIAG-END/' vpn-leak-audit.ps1 | tr -d '\r' > "$TMP/cvblk.ps1"
+        printf '\357\273\277' > "$TMP/cvharn.ps1"
+        {
+            echo '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8'
+            echo 'function Ok($m){Write-Host "OK|$m"}'
+            echo 'function Warn($m){Write-Host "WARN|$m"}'
+            echo 'function Info($m){Write-Host "INFO|$m"}'
+            echo 'function Bad($m){Write-Host "BAD|$m"}'
+            while IFS='|' read -r a b c d e f_exp f_name; do
+                [ -z "$f_exp" ] && continue
+                echo 'Write-Host "== case =="'
+                echo "\$cvOverride='$a'; \$cvHasNs='$b'; \$cvTun='$c'; \$cvStrict='$d'; \$cvPhysDns='$e'"
+                cat "$TMP/cvblk.ps1"
+            done < "$TMP/cvfix"
+        } >> "$TMP/cvharn.ps1"
+        "$PS" -NoProfile -ExecutionPolicy Bypass -File "$TMP/cvharn.ps1" > "$TMP/cvout.ps1" 2>"$TMP/cverr.ps1"
+        tr -d '\r' < "$TMP/cvout.ps1" > "$TMP/cva"
+        if [ -s "$TMP/cverr.ps1" ]; then
+            no "PowerShell CV 判定块执行报错"; sed 's/^/      /' "$TMP/cverr.ps1" | head -5
+        elif diff -q "$TMP/cva" "$TMP/cvout.sh" >/dev/null 2>&1; then
+            ok "CV 判定两版输出逐字节一致（$(grep -c . "$TMP/cva") 行）"
+        else
+            no "CV 判定两版输出不一致"
+            diff "$TMP/cva" "$TMP/cvout.sh" | head -12 | sed 's/^/      /'
+        fi
+    fi
+fi
+
 echo; echo "============================================"
 echo "  结果：PASS=$pass  FAIL=$fail  SKIP=$skip"
 if [ "$fail" -eq 0 ]; then

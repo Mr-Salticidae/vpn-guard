@@ -608,6 +608,50 @@ if [ "$TAKEOVER" = "sysproxy" ]; then
     info "当前为系统代理模式：浏览器把域名交给代理远端解析，本地 DNS 主要影响直连/不走代理的应用。"
 fi
 info "提示：确认 Chrome 已关闭「安全 DNS(DoH)」，否则浏览器会绕过 VPN 自行解析。"
+
+# ---- Clash Verge Rev 配置诊断（只读），与 .ps1 同一判定块 ----
+# 这里的 awk 只取顶层键下的缩进块，够用即可，不是通用 YAML 解析器。
+yaml_top_block() { awk -v k="$2:" 'index($0,k)==1{f=1;next} f&&/^[^[:space:]]/{exit} f' "$1" 2>/dev/null; }
+case "$(uname)" in
+    Darwin) cv_dir="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev" ;;
+    *)      cv_dir="${XDG_DATA_HOME:-$HOME/.local/share}/io.github.clash-verge-rev.clash-verge-rev" ;;
+esac
+if [ -f "$cv_dir/verge.yaml" ] && [ -f "$cv_dir/clash-verge.yaml" ]; then
+    cvOverride=off
+    grep -qE '^enable_dns_settings:[[:space:]]*true' "$cv_dir/verge.yaml" && cvOverride=on
+    yaml_top_block "$cv_dir/verge.yaml" profile_dns_settings | grep -qE '^[[:space:]]+enabled:[[:space:]]*true' && cvOverride=on
+    k_dns=$(yaml_top_block "$cv_dir/clash-verge.yaml" dns)
+    cvHasNs=no
+    if printf '%s\n' "$k_dns" | grep -qE '^[[:space:]]+nameserver:[[:space:]]*(\[[[:space:]]*[^][:space:]]|$)'; then cvHasNs=yes; fi
+    k_tun=$(yaml_top_block "$cv_dir/clash-verge.yaml" tun)
+    cvTun=false;    printf '%s\n' "$k_tun" | grep -qE '^[[:space:]]+enable:[[:space:]]*true' && cvTun=true
+    cvStrict=false; printf '%s\n' "$k_tun" | grep -qE '^[[:space:]]+strict-route:[[:space:]]*true' && cvStrict=true
+    # 「并发发给实体网卡 DNS」是 Windows 的多宿主解析行为，macOS/Linux 不以同样方式触发 —— 这里不报
+    cvPhysDns=no
+    echo
+    # CV-DIAG-BEGIN
+    # 纯判定（tests/verify-classifier.sh G 段与 .ps1 版逐字节比对）。输入四个字符串事实：
+    #   cvOverride on/off · cvHasNs yes/no · cvTun/cvStrict true/false · cvPhysDns yes/no
+    if [ "$cvHasNs" = no ]; then
+        bad "Clash Verge：内核生效配置的 dns 段没有 nameserver —— mihomo 会退回内置默认解析器，查询可能明文漏回本地 ISP"
+        if [ "$cvOverride" = off ]; then
+            info "      修复：设置 → 「DNS 覆写」打开（填加密 DNS，如 https://1.1.1.1/dns-query），保存后内核自动重启"
+        else
+            info "      修复：DNS 覆写已开，但里面没填 nameserver —— 在 设置 → DNS 覆写 里补上加密 DNS"
+        fi
+    elif [ "$cvOverride" = off ]; then
+        info "Clash Verge：DNS 覆写未开启，正在用订阅自带的 DNS（已有 nameserver）。若上面实测仍有泄露，打开 设置 → DNS 覆写 统一改成加密 DNS"
+    else
+        ok "Clash Verge：DNS 覆写已开启，内核已加载 nameserver"
+    fi
+    if [ "$cvTun" = true ] && [ "$cvStrict" != true ] && [ "$cvPhysDns" = yes ]; then
+        warn "Clash Verge：TUN 未开严格路由（strict-route）—— 系统会把同一条 DNS 查询并发发给实体网卡上的 DNS，绕过隧道"
+        info "      修复：设置 → TUN 模式旁的齿轮 → 「严格路由」打开 → 保存"
+    elif [ "$cvTun" = true ] && [ "$cvStrict" = true ]; then
+        ok "Clash Verge：TUN 已开严格路由（strict-route），实体网卡的 DNS 绕不过隧道"
+    fi
+    # CV-DIAG-END
+fi
 if [ "$DNS_LEAK" = "1" ]; then
     echo ""
     info "主动实测（触发真实解析，看解析器归属国 · 联网 bash.ws，约 10s；--no-dns-leak 可跳过）……"
