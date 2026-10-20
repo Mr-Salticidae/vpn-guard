@@ -355,7 +355,7 @@ foreach ($d in $dns) {
 if ($TakeoverMode -eq 'sysproxy') {
     Info "当前为系统代理模式：浏览器把域名交给代理远端解析，本地 DNS 主要影响直连/不走代理的应用。"
 }
-Info "提示：确认 Chrome 已关闭“安全 DNS(DoH)”，否则浏览器会绕过 VPN 自行解析。"
+Info "提示：确认 Chrome 已关闭「安全 DNS(DoH)」，否则浏览器会绕过 VPN 自行解析。"
 if (-not $NoDnsLeak) {
     Write-Host ""
     Info "主动实测（触发真实解析，看解析器归属国 · 联网 bash.ws，约 10s；-NoDnsLeak 可跳过）……"
