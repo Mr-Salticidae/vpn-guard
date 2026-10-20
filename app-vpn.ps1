@@ -111,7 +111,9 @@ $ianaToWin = @{
 # ==== 内置应用别名 ====
 # gui=$true 的是 Electron/Chromium 系（不认 TZ，需 -SystemTz 才能对齐时区）。
 $appAliases = @(
-    @{ Names=@('codex');                    Label='Codex CLI';        Gui=$false; Cmd='codex' }
+    # Codex 安装器把 exe 放在版本化子目录（bin\<hash>\codex.exe），升级后目录名会变，故用通配符取最新
+    @{ Names=@('codex');                    Label='Codex CLI';        Gui=$false; Cmd='codex'
+       Paths=@('%LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe') }
     @{ Names=@('claude','claude-code','cc');Label='Claude Code CLI';  Gui=$false; Cmd='claude' }
     @{ Names=@('claude-desktop','claudeapp');Label='Claude 桌面版';   Gui=$true;  Cmd=''
        Paths=@('%LOCALAPPDATA%\AnthropicClaude\claude.exe','%LOCALAPPDATA%\Programs\claude\Claude.exe','%LOCALAPPDATA%\Programs\AnthropicClaude\claude.exe')
@@ -120,8 +122,9 @@ $appAliases = @(
        Paths=@('%LOCALAPPDATA%\Programs\cursor\Cursor.exe'); Reg='Cursor' }
     @{ Names=@('code','vscode');            Label='VS Code';          Gui=$true;  Cmd=''
        Paths=@('%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe','%ProgramFiles%\Microsoft VS Code\Code.exe'); Reg='Visual Studio Code' }
-    @{ Names=@('chatgpt');                  Label='ChatGPT 桌面版';   Gui=$true;  Cmd=''
-       Paths=@('%LOCALAPPDATA%\Programs\ChatGPT\ChatGPT.exe'); Reg='ChatGPT' }
+    # Store 版 ChatGPT 的包名是 OpenAI.Codex（主程序 app\ChatGPT.exe，内含 Codex 桌面端）
+    @{ Names=@('chatgpt','codex-desktop');  Label='ChatGPT 桌面版';   Gui=$true;  Cmd=''
+       Paths=@('%LOCALAPPDATA%\Programs\ChatGPT\ChatGPT.exe'); Msix='OpenAI.Codex'; Reg='ChatGPT' }
 )
 
 if ($List) {
@@ -171,7 +174,11 @@ function Find-MsixApp([string]$pkgName) {
         if (Test-Path $manifest) {
             try {
                 [xml]$m = Get-Content $manifest -Encoding UTF8
-                $app = $m.Package.Applications.Application
+                # 一个包可声明多个 Application（如 OpenAI.Codex 还带一个 command-runner），
+                # 直接取 .Executable 会得到数组、Join-Path 报错后被吞成「找不到」。优先 Id=App，否则取第一个。
+                $apps = @($m.Package.Applications.Application)
+                $app = $apps | Where-Object { $_.Id -eq 'App' } | Select-Object -First 1
+                if (-not $app) { $app = $apps | Select-Object -First 1 }
                 if ($app) { $exeRel = $app.Executable; $appId = $app.Id }
             } catch {}
         }
@@ -223,7 +230,15 @@ function Resolve-App([string]$name) {
         foreach ($p in @($a.Paths)) {
             if (-not $p) { continue }
             $ex = [Environment]::ExpandEnvironmentVariables($p)
-            if (Test-Path $ex) { return @{ Path=$ex; Label=$a.Label; Gui=$a.Gui } }
+            if ($ex -match '[*?]') {
+                # 通配符路径：多个版本并存时取最近修改的那个
+                $hit = Get-Item -Path $ex -ErrorAction SilentlyContinue |
+                       Where-Object { -not $_.PSIsContainer } |
+                       Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($hit) { return @{ Path=$hit.FullName; Label=$a.Label; Gui=$a.Gui } }
+            } elseif (Test-Path -LiteralPath $ex) {
+                return @{ Path=$ex; Label=$a.Label; Gui=$a.Gui }
+            }
         }
         if ($a.Msix) {
             $found = Find-MsixApp $a.Msix
@@ -275,15 +290,20 @@ if ($sysProxyUrl)        { Info ("系统代理     : {0}（浏览器/.NET 认它
 if ($reg -and $reg.AutoConfigURL) { Warn ("PAC 模式（{0}）—— 无法从 PAC 推断固定代理地址，请用 -Proxy 显式指定" -f $reg.AutoConfigURL) }
 
 # 决定注入哪个代理地址
-$proxyUrl = $null; $proxySource = ''
+# 优先级：-Proxy 显式指定 > TUN 已接管（不注入，并清掉继承来的代理变量） > 系统代理推断。
+# TUN 接管时再走本地代理是「proxy → TUN」双重路由：每个请求多一跳，
+# SSE/WebSocket 长连接（如 Codex CLI）会因此超时断连（思路与实测数据来自 MAX0315 的 PR #1）。
+$proxyUrl = $null; $proxySource = ''; $clearProxy = $false
 if ($Proxy)              { $proxyUrl = $Proxy;      $proxySource = '你用 -Proxy 指定的' }
+elseif ($tunActive)      { $clearProxy = $true }
 elseif ($sysProxyUrl)    { $proxyUrl = $sysProxyUrl; $proxySource = '从系统代理设置推断的' }
 
 if (-not $proxyUrl -and -not $tunActive) {
     Bad "既没有 TUN 接管、也没有可用的代理地址 —— 目标程序会直连，暴露真实 IP！"
     Info "请开客户端的 TUN 模式，或加 -Proxy http://127.0.0.1:<端口>（Clash 默认 7897，v2rayN HTTP 默认 10809）。"
-} elseif (-not $proxyUrl) {
-    Info "无代理地址可注入，但 TUN 已全局接管 —— 目标程序仍走隧道。"
+} elseif ($clearProxy) {
+    Info "TUN 已全局接管 —— 不注入代理，并清除继承来的代理环境变量，目标程序直接走隧道（避免双重路由）。"
+    if ($sysProxyUrl) { Info "（系统代理也开着；若确实要走它，用 -Proxy 显式指定）" }
 }
 
 # ---- 1) 探测出口 ----
@@ -348,6 +368,10 @@ if ($proxyUrl) {
     foreach ($n in 'HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','https_proxy','http_proxy','all_proxy') { $inject[$n] = $proxyUrl }
     $inject['NO_PROXY'] = $noProxy; $inject['no_proxy'] = $noProxy
     Info ("代理环境变量取自：{0}" -f $proxySource)
+} elseif ($clearProxy) {
+    # 置空 = 删除该进程级变量（PS5.1 实测），退出后由 $savedEnv 原样还原
+    foreach ($n in 'HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','https_proxy','http_proxy','all_proxy') { $inject[$n] = '' }
+    $inject['NO_PROXY'] = '*'; $inject['no_proxy'] = '*'
 }
 
 if ($Print) {
